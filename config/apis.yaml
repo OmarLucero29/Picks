@@ -1,0 +1,1 @@
+odds: {provider: theoddsapi, secret_env_key: ODDS_API_KEY}

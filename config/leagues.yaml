@@ -1,0 +1,2 @@
+futbol: {all_competitions: true}
+beisbol: {MLB: true, KBO: true}
