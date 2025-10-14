@@ -4,7 +4,7 @@ on:
     - cron: "0 12 * * *"
   workflow_dispatch: {}
    (opcional) también disparar con push a main
-   push:
+ push:
      branches: [main]
 
 concurrency:
