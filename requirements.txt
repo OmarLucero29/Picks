@@ -1,4 +1,5 @@
 pandas
 numpy
-huggingface_hub
 requests
+python-dateutil
+huggingface_hub
