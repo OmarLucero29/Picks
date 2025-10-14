@@ -1,0 +1,29 @@
+name: daily
+on:
+  schedule:
+    - cron: "0 12 * * *"   # 12:00 UTC diario
+  workflow_dispatch: {}
+jobs:
+  run-daily:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - run: python pipelines/fetch_all.py --mode daily
+      - run: python pipelines/features.py
+      - run: python models/predict.py
+      - run: python serving/select_picks.py
+      - run: python serving/parlay_builder.py
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: daily_outputs
+          path: reports/
+      - name: Sync to Hugging Face
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_SPACE: ${{ secrets.HF_SPACE }}
+        run: python serving/sync_hf.py
