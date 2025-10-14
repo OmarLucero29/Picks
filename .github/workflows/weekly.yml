@@ -1,7 +1,7 @@
 name: weekly
 on:
   schedule:
-    - cron: "0 7 * * 2"   # Martes 07:00 UTC = 01:00 América/Mérida
+    - cron: "0 7 * * 2"   # Martes 07:00 UTC (≈ 01:00 MX centro)
   workflow_dispatch: {}
 
 concurrency:
@@ -14,52 +14,90 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
       - name: Install deps
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
+
+      - name: Preflight secrets
+        env:
+          HAS_ODDS: ${{ secrets.ODDS_API_KEY }}
+          HAS_PS: ${{ secrets.PANDASCORE_TOKEN }}
+          HAS_HF: ${{ secrets.HF_TOKEN }}
+          HAS_SPACE: ${{ secrets.HF_SPACE }}
+          HAS_APIFB: ${{ secrets.APIFOOTBALL_KEY }}
+          HAS_TG: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          HAS_TGCHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          [ -n "$HAS_ODDS" ] && echo "ODDS_API_KEY: OK" || echo "::warning::ODDS_API_KEY faltante"
+          [ -n "$HAS_PS" ] && echo "PANDASCORE_TOKEN: OK" || echo "PANDASCORE_TOKEN faltante (solo e-sports)"
+          [ -n "$HAS_APIFB" ] && echo "APIFOOTBALL_KEY: OK" || echo "::warning::APIFOOTBALL_KEY faltante (fútbol histórico)"
+          [ -n "$HAS_HF" ] && echo "HF_TOKEN: OK" || echo "::warning::HF_TOKEN faltante"
+          [ -n "$HAS_SPACE" ] && echo "HF_SPACE: OK" || echo "::warning::HF_SPACE faltante"
+          if [ -n "$HAS_TG" ] && [ -n "$HAS_TGCHAT" ]; then echo "Telegram: OK"; else echo "Telegram: no configurado"; fi
+
       - name: Fetch historical TENNIS
         run: python pipelines/historical_tennis.py
+
       - name: Fetch historical NFL
         run: python pipelines/historical_nfl.py
+
       - name: Fetch historical NBA (balldontlie)
         run: python pipelines/historical_nba_balldontlie.py
+
       - name: Fetch historical MLB (statsapi)
         run: python pipelines/historical_mlb_statsapi.py
+
       - name: Fetch historical NHL (statsapi)
         run: python pipelines/historical_nhl_statsapi.py
+
       - name: Soccer recent history (180d)
         env:
           APIFOOTBALL_KEY: ${{ secrets.APIFOOTBALL_KEY }}
         run: python pipelines/historical_soccer_apifootball.py
+
       - name: Fetch upcoming (48h)
+        env:
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          PANDASCORE_TOKEN: ${{ secrets.PANDASCORE_TOKEN }}
         run: python pipelines/fetch_all.py --mode weekly
+
       - name: Build features
         run: python pipelines/features.py
+
       - name: Train (baselines)
         run: python models/train.py --years 5 --calibrate isotonic --ensemble
+
       - name: Backtest (summary)
         run: python models/backtest.py --years 5 --publish reports/
+
       - name: Predict
         run: python models/predict.py
+
       - name: Select Top-5
         run: python serving/select_picks.py
+
       - name: Build Parlay
         run: python serving/parlay_builder.py
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: weekly_reports
           path: reports/
+
       - name: Sync to Hugging Face
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_SPACE: ${{ secrets.HF_SPACE }}
         run: python serving/sync_hf.py
-           - name: Notify Telegram (robusto)
+
+      - name: Notify Telegram (robusto)
         if: ${{ secrets.TELEGRAM_BOT_TOKEN != '' && secrets.TELEGRAM_CHAT_ID != '' }}
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -70,7 +108,8 @@ jobs:
           RES=$(curl -s -w "\n%{http_code}" -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             -d chat_id="${TELEGRAM_CHAT_ID}" \
             -d text="🛠️ Recalibración semanal completada. Nuevos picks publicados. Space: ${HF_SPACE}")
-          BODY=$(echo "$RES" | head -n1); CODE=$(echo "$RES" | tail -n1)
+          CODE=$(echo "$RES" | tail -n1)
+          BODY=$(echo "$RES" | head -n1)
           echo "HTTP $CODE"
           echo "$BODY"
           test "$CODE" = "200"
