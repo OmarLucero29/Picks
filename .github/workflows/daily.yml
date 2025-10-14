@@ -80,3 +80,4 @@ jobs:
           CODE=$(echo "$RES" | tail -n1); BODY=$(echo "$RES" | head -n1)
           echo "HTTP $CODE"; echo "$BODY"
           test "$CODE" = "200"
+
