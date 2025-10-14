@@ -1,4 +1,4 @@
-# pipelines/fetch_all.py
+# pipelines/fetch_all.py  (VERSION r2-ps-fix)
 import os, requests
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
@@ -10,7 +10,7 @@ PROC = Path("data/processed"); PROC.mkdir(parents=True, exist_ok=True)
 ODDS_KEY = os.environ.get("ODDS_API_KEY", "")
 PANDASCORE_TOKEN = os.environ.get("PANDASCORE_TOKEN", "")
 
-def utcnow(): 
+def utcnow():
     return datetime.now(timezone.utc)
 
 def safe_get(cur, *keys, default=None):
@@ -144,15 +144,30 @@ def fetch_from_theoddsapi(hours_ahead=48):
     return pd.DataFrame(rows)
 
 # -------------------- PandaScore (e-sports) --------------------
-def _ps_team_name(m, idx):
-    # Estructura típica: opponents = [ { 'opponent': {'name': ...} }, ... ]
-    opp = safe_get(m, "opponents", idx, default=None)
-    if isinstance(opp, dict):
-        name = safe_get(opp, "opponent", "name", default=None) or opp.get("name")
-        if name: return name
-    return "TBA"
+def ps_normalize_team(entry):
+    """entry puede ser {'opponent': {...}}, {'team': {...}} o directamente {'name': ...}."""
+    if not isinstance(entry, dict): 
+        return None
+    # Formato usual
+    if isinstance(entry.get("opponent"), dict):
+        return entry["opponent"].get("name") or entry["opponent"].get("slug") or entry["opponent"].get("acronym")
+    # Otras variantes
+    if isinstance(entry.get("team"), dict):
+        return entry["team"].get("name") or entry["team"].get("slug")
+    # Flat
+    for k in ("name","slug","acronym","short_name","display_name"):
+        if entry.get(k): return entry[k]
+    return None
 
-def _ps_start_dt(m):
+def ps_extract_teams(m):
+    opps = m.get("opponents") or []
+    home = ps_normalize_team(opps[0]) if len(opps)>0 else None
+    away = ps_normalize_team(opps[1]) if len(opps)>1 else None
+    if not home: home = "TBA"
+    if not away: away = "TBA"
+    return home, away
+
+def ps_extract_begin(m):
     for k in ("begin_at","scheduled_at","start_at"):
         val = m.get(k)
         if val:
@@ -189,11 +204,10 @@ def fetch_pandascore(hours_ahead=48):
             break
 
         for m in data:
-            start_dt = _ps_start_dt(m)
+            start_dt = ps_extract_begin(m)
             if not start_dt:
                 continue
-            home = _ps_team_name(m, 0)
-            away = _ps_team_name(m, 1)
+            home, away = ps_extract_teams(m)
             league = safe_get(m, "league", "name", default="eSports")
 
             rows.append(dict(
@@ -202,7 +216,7 @@ def fetch_pandascore(hours_ahead=48):
                 spread_line=None, spread_home=None, spread_away=None
             ))
         page += 1
-        if page > 4:  # límite de paginación para no exceder rate limits
+        if page > 4:
             break
 
     return pd.DataFrame(rows)
@@ -213,11 +227,10 @@ if __name__ == "__main__":
     es = fetch_pandascore(hours_ahead=48)
     df = pd.concat([base, es], ignore_index=True)
 
-    # Limpieza y orden
     if not df.empty:
         df["status"] = "scheduled"
         df = df.dropna(subset=["start_time_utc","home","away"], how="any").sort_values("start_time_utc")
 
     out = PROC / "upcoming_events.csv"
     df.to_csv(out, index=False)
-    print(f"fetch ok – wrote {len(df)} events -> {out}")
+    print(f"[fetch_all r2] fetch ok – wrote {len(df)} events -> {out}")
