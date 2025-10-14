@@ -3,9 +3,9 @@ on:
   schedule:
     - cron: "0 12 * * *"
   workflow_dispatch: {}
-  # (opcional) también disparar con push a main
-  # push:
-  #   branches: [main]
+   (opcional) también disparar con push a main
+   push:
+     branches: [main]
 
 concurrency:
   group: daily-${{ github.ref }}
