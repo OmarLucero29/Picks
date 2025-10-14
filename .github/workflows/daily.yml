@@ -1,11 +1,20 @@
 name: daily
 on:
   schedule:
-    - cron: "0 12 * * *"   # 12:00 UTC diario
+    - cron: "0 12 * * *"
   workflow_dispatch: {}
+  # (opcional) también disparar con push a main
+  # push:
+  #   branches: [main]
+
+concurrency:
+  group: daily-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   run-daily:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
