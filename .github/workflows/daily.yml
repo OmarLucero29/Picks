@@ -27,16 +27,22 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_SPACE: ${{ secrets.HF_SPACE }}
         run: python serving/sync_hf.py
-      - name: Notify Telegram (opcional)
-        if: ${{ secrets.TELEGRAM_BOT_TOKEN != '' && secrets.TELEGRAM_CHAT_ID != '' }}
+   - name: Notify Telegram (robusto)
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          HF_SPACE: ${{ secrets.HF_SPACE }}
+        if: ${{ (env.TELEGRAM_BOT_TOKEN != '') && (env.TELEGRAM_CHAT_ID != '') }}
         run: |
-          curl -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
-            -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
-            -d text="✅ Picks diarios y parlay publicados en el Space: ${{ secrets.HF_SPACE }}"
-
-- name: Notify Telegram (opcional)
-        if: ${{ secrets.TELEGRAM_BOT_TOKEN != '' && secrets.TELEGRAM_CHAT_ID != '' }}
-        run: |
-          curl -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
-            -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
-            -d text="✅ Picks y Parlay publicados. Space: ${{ secrets.HF_SPACE }}"
+          set -e
+          echo "Verificando bot y chat…"
+          curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe" | sed 's/\"id\":[0-9]\+/\"id\":***masked***/g'
+          curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getChat?chat_id=${TELEGRAM_CHAT_ID}" | sed 's/\"id\":[-0-9]\+/\"id\":***masked***/g'
+          echo "Enviando mensaje…"
+          RES=$(curl -s -w "\n%{http_code}" -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            -d text="✅ Picks y Parlay publicados.\nSpace: ${HF_SPACE}")
+          BODY=$(echo "$RES" | head -n1)
+          CODE=$(echo "$RES" | tail -n1)
+          echo "HTTP $CODE: $BODY"
+          [ "$CODE" = "200" ] || (echo "::error::Falló el envío a Telegram"; exit 1)
