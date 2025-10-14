@@ -1,1 +1,1 @@
-# Picks
+# PicksBot 
