@@ -75,7 +75,9 @@ def main():
             total=(float(total) if total else None), ou_pick=ou_pick, delta_total=float(delta_total),
             spread=spread_pick
         ))
-    out=pd.DataFrame(rows); out.to_csv(PROC/'predictions.csv', index=False)
-    print(f"predictions ok – {len(out)} rows -> {out}")
+    cols=['date','sport','league','game','winner','p_win','total','ou_pick','delta_total','spread']
+    out = pd.DataFrame(rows, columns=cols)  # << asegura encabezados aunque no haya filas
+    out.to_csv(PROC/'predictions.csv', index=False)
+    print(f"predictions ok – {len(out)} rows -> {PROC/'predictions.csv'}")
 
 if __name__=='__main__': main()
