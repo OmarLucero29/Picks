@@ -10,20 +10,45 @@ PROC = Path("data/processed"); PROC.mkdir(parents=True, exist_ok=True)
 ODDS_KEY = os.environ.get("ODDS_API_KEY", "")
 PANDASCORE_TOKEN = os.environ.get("PANDASCORE_TOKEN", "")
 
-def utcnow(): return datetime.now(timezone.utc)
-def safe_get(d, *keys, default=None):
-    cur = d
-    for k in keys:
-        if cur is None: return default
-        cur = cur.get(k)
-    return cur if cur is not None else default
+def utcnow(): 
+    return datetime.now(timezone.utc)
 
-# -------- TheOddsAPI (base multi-deporte + bet365) --------
+def safe_get(cur, *keys, default=None):
+    """
+    Acceso seguro para mezclas dict/list con índices.
+    safe_get(d, 'a', 0, 'b') -> d['a'][0]['b'] si existe; si no, default.
+    """
+    for k in keys:
+        if cur is None:
+            return default
+        if isinstance(k, int):
+            if isinstance(cur, (list, tuple)) and -len(cur) <= k < len(cur):
+                cur = cur[k]
+            else:
+                return default
+        else:
+            if isinstance(cur, dict):
+                cur = cur.get(k)
+            else:
+                return default
+    return default if cur is None else cur
+
+# -------------------- TheOddsAPI (cuotas bet365) --------------------
 def fetch_from_theoddsapi(hours_ahead=48):
     if not ODDS_KEY:
-        return pd.DataFrame(columns=["sport","league","start_time_utc","status","home","away","market_total","ml_home","ml_away","spread_line","spread_home","spread_away"])
-    sports = requests.get("https://api.the-odds-api.com/v4/sports",
-                          params={"apiKey": ODDS_KEY, "all": "true"}, timeout=30).json()
+        return pd.DataFrame(columns=[
+            "sport","league","start_time_utc","status","home","away",
+            "market_total","ml_home","ml_away","spread_line","spread_home","spread_away"
+        ])
+
+    try:
+        sports = requests.get(
+            "https://api.the-odds-api.com/v4/sports",
+            params={"apiKey": ODDS_KEY, "all": "true"}, timeout=30
+        ).json()
+    except Exception:
+        sports = []
+
     keep = []
     for s in sports:
         key = s.get("key","")
@@ -38,7 +63,7 @@ def fetch_from_theoddsapi(hours_ahead=48):
             key.startswith("tabletennis_"),
             key.startswith("mma_"),
             key.startswith("boxing_"),
-            key.startswith("motorsport_")
+            key.startswith("motorsport_"),
         ]):
             keep.append(s)
 
@@ -48,15 +73,17 @@ def fetch_from_theoddsapi(hours_ahead=48):
     for s in keep:
         key = s["key"]
         try:
-            r = requests.get(f"https://api.the-odds-api.com/v4/sports/{key}/odds",
-                             params={
-                                 "apiKey": ODDS_KEY,
-                                 "regions": "us,eu,uk",
-                                 "markets": "h2h,totals,spreads",
-                                 "oddsFormat": "decimal",
-                                 "dateFormat": "iso",
-                                 "bookmakers": "bet365"
-                             }, timeout=30)
+            r = requests.get(
+                f"https://api.the-odds-api.com/v4/sports/{key}/odds",
+                params={
+                    "apiKey": ODDS_KEY,
+                    "regions": "us,eu,uk",
+                    "markets": "h2h,totals,spreads",
+                    "oddsFormat": "decimal",
+                    "dateFormat": "iso",
+                    "bookmakers": "bet365",
+                }, timeout=30
+            )
             r.raise_for_status()
             events = r.json()
         except Exception:
@@ -70,24 +97,25 @@ def fetch_from_theoddsapi(hours_ahead=48):
             if start <= utcnow() or start > end_time:
                 continue
 
-            home = safe_get(ev,"home_team", default="")
-            away = safe_get(ev,"away_team", default="")
+            home = ev.get("home_team","")
+            away = ev.get("away_team","")
             league = s.get("title", key)
             sport_key = key.split("_")[0]
 
             bm = next((b for b in ev.get("bookmakers", []) if b.get("key")=="bet365"), None)
-            ml_home = ml_away = None; market_total = None
+            ml_home = ml_away = None
+            market_total = None
             spread_line = None; spread_home = spread_away = None
             if bm:
                 for m in bm.get("markets", []):
                     if m.get("key") == "h2h":
-                        outs = m.get("outcomes", [])
-                        for o in outs:
+                        for o in m.get("outcomes", []):
                             if o.get("name") == home: ml_home = o.get("price")
                             if o.get("name") == away: ml_away = o.get("price")
                     elif m.get("key") == "totals":
                         outs = m.get("outcomes", [])
-                        if outs: market_total = outs[0].get("point")
+                        if outs:
+                            market_total = outs[0].get("point")
                     elif m.get("key") == "spreads":
                         outs = m.get("outcomes", [])
                         if outs:
@@ -115,44 +143,81 @@ def fetch_from_theoddsapi(hours_ahead=48):
             ))
     return pd.DataFrame(rows)
 
-# -------- PandaScore (e-sports próximos) --------
+# -------------------- PandaScore (e-sports) --------------------
+def _ps_team_name(m, idx):
+    # Estructura típica: opponents = [ { 'opponent': {'name': ...} }, ... ]
+    opp = safe_get(m, "opponents", idx, default=None)
+    if isinstance(opp, dict):
+        name = safe_get(opp, "opponent", "name", default=None) or opp.get("name")
+        if name: return name
+    return "TBA"
+
+def _ps_start_dt(m):
+    for k in ("begin_at","scheduled_at","start_at"):
+        val = m.get(k)
+        if val:
+            try:
+                return parser.isoparse(val)
+            except Exception:
+                pass
+    return None
+
 def fetch_pandascore(hours_ahead=48):
     if not PANDASCORE_TOKEN:
         return pd.DataFrame(columns=["sport","league","start_time_utc","status","home","away"])
+
     end = (utcnow() + timedelta(hours=hours_ahead)).isoformat()
     start = utcnow().isoformat()
     url = "https://api.pandascore.co/matches/upcoming"
     rows = []; page = 1
+
     while True:
-        r = requests.get(url, params={
-            "per_page": 50, "page": page,
-            "range[begin_at]": f"{start},{end}"
-        }, headers={"Authorization": f"Bearer {PANDASCORE_TOKEN}"}, timeout=30)
-        if r.status_code != 200: break
-        data = r.json()
-        if not data: break
+        try:
+            r = requests.get(
+                url,
+                params={"per_page": 50, "page": page, "range[begin_at]": f"{start},{end}"},
+                headers={"Authorization": f"Bearer {PANDASCORE_TOKEN}"},
+                timeout=30
+            )
+            if r.status_code != 200:
+                break
+            data = r.json()
+        except Exception:
+            break
+
+        if not data:
+            break
+
         for m in data:
-            begin = safe_get(m,"begin_at", default=None)
-            if not begin: continue
-            start_dt = parser.isoparse(begin)
-            home = safe_get(m,"opponents",0,"opponent","name", default="TBA")
-            away = safe_get(m,"opponents",1,"opponent","name", default="TBA")
-            league = safe_get(m,"league","name", default="eSports")
+            start_dt = _ps_start_dt(m)
+            if not start_dt:
+                continue
+            home = _ps_team_name(m, 0)
+            away = _ps_team_name(m, 1)
+            league = safe_get(m, "league", "name", default="eSports")
+
             rows.append(dict(
                 sport="esports", league=league, start_time_utc=start_dt.isoformat(), status="scheduled",
                 home=home, away=away, market_total=None, ml_home=None, ml_away=None,
                 spread_line=None, spread_home=None, spread_away=None
             ))
         page += 1
-        if page>4: break
+        if page > 4:  # límite de paginación para no exceder rate limits
+            break
+
     return pd.DataFrame(rows)
 
+# -------------------- MAIN --------------------
 if __name__ == "__main__":
     base = fetch_from_theoddsapi(hours_ahead=48)
     es = fetch_pandascore(hours_ahead=48)
     df = pd.concat([base, es], ignore_index=True)
-    df["status"] = "scheduled"
-    df = df.dropna(subset=["start_time_utc","home","away"], how="any").sort_values("start_time_utc")
+
+    # Limpieza y orden
+    if not df.empty:
+        df["status"] = "scheduled"
+        df = df.dropna(subset=["start_time_utc","home","away"], how="any").sort_values("start_time_utc")
+
     out = PROC / "upcoming_events.csv"
     df.to_csv(out, index=False)
     print(f"fetch ok – wrote {len(df)} events -> {out}")
