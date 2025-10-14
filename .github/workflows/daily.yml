@@ -41,15 +41,22 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_SPACE: ${{ secrets.HF_SPACE }}
         run: python serving/sync_hf.py
-      - name: Notify Telegram (robusto)
+            - name: Notify Telegram (robusto)
+        if: ${{ secrets.TELEGRAM_BOT_TOKEN != '' && secrets.TELEGRAM_CHAT_ID != '' }}
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           HF_SPACE: ${{ secrets.HF_SPACE }}
-        if: ${{ (env.TELEGRAM_BOT_TOKEN != '') && (env.TELEGRAM_CHAT_ID != '') }}
         run: |
           set -e
-          RES=$(curl -s -w "\n%{http_code}" -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage"             -d chat_id="${TELEGRAM_CHAT_ID}"             -d text="✅ Picks y Parlay publicados. Space: ${HF_SPACE}")
+          echo "Verificando bot y chat…"
+          curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe" || true
+          curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getChat?chat_id=${TELEGRAM_CHAT_ID}" || true
+          echo "Enviando mensaje…"
+          RES=$(curl -s -w "\n%{http_code}" -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            -d text="✅ Picks y Parlay publicados. Space: ${HF_SPACE}")
           BODY=$(echo "$RES" | head -n1); CODE=$(echo "$RES" | tail -n1)
-          echo "HTTP $CODE: $BODY"
-          [ "$CODE" = "200" ] || (echo "::error::Falló el envío a Telegram"; exit 1)
+          echo "HTTP $CODE"
+          echo "$BODY"
+          test "$CODE" = "200"
