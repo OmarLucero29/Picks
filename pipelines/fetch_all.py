@@ -8,7 +8,6 @@ import pandas as pd
 PROC = Path("data/processed"); PROC.mkdir(parents=True, exist_ok=True)
 
 ODDS_KEY = os.environ.get("ODDS_API_KEY", "")
-APIFOOTBALL_KEY = os.environ.get("APIFOOTBALL_KEY", "")
 PANDASCORE_TOKEN = os.environ.get("PANDASCORE_TOKEN", "")
 
 def utcnow(): return datetime.now(timezone.utc)
@@ -22,7 +21,7 @@ def safe_get(d, *keys, default=None):
 # -------- TheOddsAPI (base multi-deporte + bet365) --------
 def fetch_from_theoddsapi(hours_ahead=48):
     if not ODDS_KEY:
-        return pd.DataFrame(columns=["sport","league","start_time_utc","status","home","away","market_total","ml_home","ml_away"])
+        return pd.DataFrame(columns=["sport","league","start_time_utc","status","home","away","market_total","ml_home","ml_away","spread_line","spread_home","spread_away"])
     sports = requests.get("https://api.the-odds-api.com/v4/sports",
                           params={"apiKey": ODDS_KEY, "all": "true"}, timeout=30).json()
     keep = []
@@ -36,8 +35,8 @@ def fetch_from_theoddsapi(hours_ahead=48):
             key.startswith("icehockey_"),
             key.startswith("tennis_"),
             key.startswith("esports_"),
-            key.startswith("tabletennis_"),   # por si está disponible
-            key.startswith("mma_"),           # eventos especiales si aparecen
+            key.startswith("tabletennis_"),
+            key.startswith("mma_"),
             key.startswith("boxing_"),
             key.startswith("motorsport_")
         ]):
@@ -53,7 +52,7 @@ def fetch_from_theoddsapi(hours_ahead=48):
                              params={
                                  "apiKey": ODDS_KEY,
                                  "regions": "us,eu,uk",
-                                 "markets": "h2h,totals",
+                                 "markets": "h2h,totals,spreads",
                                  "oddsFormat": "decimal",
                                  "dateFormat": "iso",
                                  "bookmakers": "bet365"
@@ -76,18 +75,26 @@ def fetch_from_theoddsapi(hours_ahead=48):
             league = s.get("title", key)
             sport_key = key.split("_")[0]
 
-            # odds bet365
             bm = next((b for b in ev.get("bookmakers", []) if b.get("key")=="bet365"), None)
             ml_home = ml_away = None; market_total = None
+            spread_line = None; spread_home = spread_away = None
             if bm:
                 for m in bm.get("markets", []):
                     if m.get("key") == "h2h":
-                        for o in m.get("outcomes", []):
+                        outs = m.get("outcomes", [])
+                        for o in outs:
                             if o.get("name") == home: ml_home = o.get("price")
                             if o.get("name") == away: ml_away = o.get("price")
                     elif m.get("key") == "totals":
                         outs = m.get("outcomes", [])
                         if outs: market_total = outs[0].get("point")
+                    elif m.get("key") == "spreads":
+                        outs = m.get("outcomes", [])
+                        if outs:
+                            spread_line = outs[0].get("point")
+                            for o in outs:
+                                if o.get("name")==home: spread_home = o.get("price")
+                                if o.get("name")==away: spread_away = o.get("price")
 
             if sport_key == "soccer": sport = "futbol"
             elif sport_key == "americanfootball": sport = "americano"
@@ -104,50 +111,9 @@ def fetch_from_theoddsapi(hours_ahead=48):
                 start_time_utc=start.isoformat(), status="scheduled",
                 home=home, away=away,
                 market_total=market_total, ml_home=ml_home, ml_away=ml_away,
+                spread_line=spread_line, spread_home=spread_home, spread_away=spread_away
             ))
     return pd.DataFrame(rows)
-
-# -------- Enriquecimiento fútbol (últimos 5) con API-FOOTBALL --------
-def enrich_soccer_last5(df: pd.DataFrame) -> pd.DataFrame:
-    if not APIFOOTBALL_KEY: 
-        return df
-    API_BASE = "https://v3.football.api-sports.io"
-    HEADERS = {"x-apisports-key": APIFOOTBALL_KEY}
-
-    teams = set(df.loc[df["sport"]=="futbol","home"]).union(set(df.loc[df["sport"]=="futbol","away"]))
-    stats = {}
-    for name in teams:
-        try:
-            sr = requests.get(f"{API_BASE}/teams", params={"search": name}, headers=HEADERS, timeout=20).json()
-            tid = safe_get(sr,"response",0,"team","id", default=None)
-            if not tid: continue
-            fr = requests.get(f"{API_BASE}/fixtures", params={"team": tid, "last": 5}, headers=HEADERS, timeout=30).json()
-            resp = fr.get("response", [])
-            gf = ga = 0.0; totals=[]
-            for g in resp:
-                gh = safe_get(g,"goals","home", default=0) or 0
-                ga_ = safe_get(g,"goals","away", default=0) or 0
-                hid = safe_get(g,"teams","home","id", default=None)
-                if hid == tid: gf += gh; ga += ga_
-                else: gf += ga_; ga += gh
-                totals.append(gh+ga_)
-            n = max(1,len(resp))
-            stats[name] = dict(ppg_for=gf/n, ppg_against=ga/n, tot5=(sum(totals)/n if totals else 2.5))
-        except Exception:
-            continue
-
-    def map_stat(team, key, fallback):
-        d = stats.get(team); 
-        return d.get(key, fallback) if d else fallback
-
-    if "home_ppg_for" not in df.columns:
-        df["home_ppg_for"] = df.apply(lambda r: map_stat(r["home"],"ppg_for",1.5), axis=1)
-        df["home_ppg_against"] = df.apply(lambda r: map_stat(r["home"],"ppg_against",1.0), axis=1)
-        df["home_recent_totals_5"] = df.apply(lambda r: map_stat(r["home"],"tot5",2.5), axis=1)
-        df["away_ppg_for"] = df.apply(lambda r: map_stat(r["away"],"ppg_for",1.3), axis=1)
-        df["away_ppg_against"] = df.apply(lambda r: map_stat(r["away"],"ppg_against",1.2), axis=1)
-        df["away_recent_totals_5"] = df.apply(lambda r: map_stat(r["away"],"tot5",2.5), axis=1)
-    return df
 
 # -------- PandaScore (e-sports próximos) --------
 def fetch_pandascore(hours_ahead=48):
@@ -174,7 +140,8 @@ def fetch_pandascore(hours_ahead=48):
             league = safe_get(m,"league","name", default="eSports")
             rows.append(dict(
                 sport="esports", league=league, start_time_utc=start_dt.isoformat(), status="scheduled",
-                home=home, away=away, market_total=None, ml_home=None, ml_away=None
+                home=home, away=away, market_total=None, ml_home=None, ml_away=None,
+                spread_line=None, spread_home=None, spread_away=None
             ))
         page += 1
         if page>4: break
@@ -184,8 +151,6 @@ if __name__ == "__main__":
     base = fetch_from_theoddsapi(hours_ahead=48)
     es = fetch_pandascore(hours_ahead=48)
     df = pd.concat([base, es], ignore_index=True)
-    if not df.empty and (df["sport"]=="futbol").any():
-        df = enrich_soccer_last5(df)
     df["status"] = "scheduled"
     df = df.dropna(subset=["start_time_utc","home","away"], how="any").sort_values("start_time_utc")
     out = PROC / "upcoming_events.csv"

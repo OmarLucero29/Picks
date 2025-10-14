@@ -1,1 +1,9 @@
-futbol: [ganador]
+# mercados soportados; si faltan datos para un mercado en un partido se marca "No Bet"
+futbol: [ganador, over_under_goles, total_goles, corners, tarjetas, offsides, handicap, props_equipo, props_jugador]
+beisbol: [ganador, handicap, total_carreras, props_equipo, props_jugador, entradas]
+baloncesto: [ganador, handicap, total_puntos, props_equipo, props_jugador]
+tenis: [ganador, juegos_totales, ganara_un_set, ganara_sin_perder_set]
+hockey: [ganador, total_goles, handicap]
+ping_pong: [ganador, juegos_totales]
+americano: [ganador, totales, over_under, spread, handicap, props_jugador, props_equipo]
+esports: [ganador, total_mapas, total_kills, e_futbol_ganador, e_futbol_over_under]

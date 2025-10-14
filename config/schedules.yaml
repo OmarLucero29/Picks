@@ -1,1 +1,8 @@
-americano: {recalibrate: weekly, day_local: "Tue", hour_local: "01:00"}
+futbol: {recalibrate: daily, hour_local: "05:00"}
+baloncesto: {recalibrate: "Mon,Wed,Fri", hour_local: "03:00"}
+beisbol: {recalibrate: daily, hour_local: "04:00"}
+tenis: {recalibrate: daily, hour_local: "02:00"}
+hockey: {recalibrate: weekly, day_local: "Mon", hour_local: "03:00"}
+americano: {recalibrate: weekly, day_local: "Tue", hour_local: "01:00"}  # NFL después del MNF
+ping_pong: {recalibrate: daily, hour_local: "01:00"}
+esports: {recalibrate: daily, hour_local: "01:30"}

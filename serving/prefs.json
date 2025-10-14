@@ -1,0 +1,10 @@
+{
+  "language": "es_MX",
+  "explanation_max_lines": 10,
+  "daily_picks_target": 5,
+  "parlay_always": true,
+  "parlay_min_legs": 2,
+  "parlay_max_legs": 5,
+  "parlay_min_combined_odds": 2.5,
+  "parlay_min_combined_prob": 0.55
+}

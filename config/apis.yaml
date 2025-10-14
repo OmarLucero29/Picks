@@ -1,1 +1,10 @@
 odds: {provider: theoddsapi, secret_env_key: ODDS_API_KEY}
+weather: {provider: meteostat, secondary: open-meteo}
+soccer_data: {primary: api_football, secret_env_key: APIFOOTBALL_KEY}
+nba_data: {primary: balldontlie_api}
+mlb_data: {primary: mlb_stats_api}
+nhl_data: {primary: nhl_stats_api}
+nfl_data: {primary: nflverse_csv}
+tennis_data: {primary: api_sports_tennis, alt: jeff_sackmann_csvs, secret_env_key: APISPORTS_TENNIS_KEY}
+esports_data: {primary: pandascore, secret_env_key: PANDASCORE_TOKEN}
+special_events: {mma_ufc: ufcstats_scrape, boxing: topology_scrape, f1: fastf1}

@@ -1,2 +1,8 @@
 futbol: {all_competitions: true}
 beisbol: {MLB: true, KBO: true}
+baloncesto: {NBA: true, NCAA: true, LNBP: true, Euroliga: true, Europa_otros: true}
+tenis: {all_tours: true}
+hockey: {NHL: true}
+ping_pong: {all_competitions: true}
+americano: {NFL: true, NCAA: true, LFA: true}
+esports: {all_competitions: true}

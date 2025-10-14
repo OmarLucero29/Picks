@@ -1,11 +1,11 @@
 import gradio as gr, pandas as pd, time
 
-def load(path):
-    try: return pd.read_csv(path)
+def load(p): 
+    try: return pd.read_csv(p)
     except: return pd.DataFrame()
 
 def filter_sport(df, s):
-    if s=="todos" or df.empty: return df
+    if df is None or df.empty or s=="todos": return df
     return df[df["sport"]==s]
 
 with gr.Blocks() as demo:
@@ -14,9 +14,8 @@ with gr.Blocks() as demo:
     sport = gr.Dropdown(choices=['todos','futbol','baloncesto','beisbol','tenis','hockey','ping_pong','americano','esports'], value='todos', label='Filtrar por deporte')
     with gr.Tabs():
         with gr.Tab("Top-5 del día"):
-            picks_df = gr.State(load('picks.csv'))
             table = gr.Dataframe(value=filter_sport(load('picks.csv'), 'todos'), interactive=False, wrap=True, height=500)
-            dl = gr.File(label="Descargar picks.csv", value='picks.csv', visible=True)
+            gr.File(label="Descargar picks.csv", value='picks.csv', visible=True)
             def update(s):
                 df = load('picks.csv')
                 return filter_sport(df, s)
