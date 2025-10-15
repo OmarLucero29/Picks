@@ -14,13 +14,13 @@ jobs:
     timeout-minutes: 30
     env:
       # Exponemos secrets como ENV de JOB
-      ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
-      PANDASCORE_TOKEN: ${{ secrets.PANDASCORE_TOKEN }}
-       APIFOOTBALL_KEY: ${{ secrets.APIFOOTBALL_KEY }}
-      HF_TOKEN: ${{ secrets.HF_TOKEN }}
-      HF_SPACE: ${{ secrets.HF_SPACE }}
-      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+  ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+  PANDASCORE_TOKEN: ${{ secrets.PANDASCORE_TOKEN }}
+  APIFOOTBALL_KEY: ${{ secrets.APIFOOTBALL_KEY }}   # <- incluido
+  HF_TOKEN: ${{ secrets.HF_TOKEN }}
+  HF_SPACE: ${{ secrets.HF_SPACE }}
+  TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+  TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
     steps:
       - uses: actions/checkout@v4
