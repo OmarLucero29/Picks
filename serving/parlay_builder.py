@@ -1,34 +1,56 @@
+# serving/parlay_builder.py — parlay con SOLO prob del modelo; sin odds
+from pathlib import Path
 import pandas as pd
-from itertools import combinations
-import json, os
+import numpy as np
 
-PREFS=json.load(open('serving/prefs.json','r',encoding='utf-8'))
+REPORTS = Path("reports"); REPORTS.mkdir(parents=True, exist_ok=True)
 
-def safe_load_picks(path='reports/picks.csv'):
-    if not os.path.exists(path) or os.path.getsize(path)==0:
-        return pd.DataFrame(columns=['date','sport','league','game','market','selection','line','prob','prob_decimal_odds','confidence','rationale'])
-    try:
-        return pd.read_csv(path)
-    except Exception:
-        return pd.DataFrame(columns=['date','sport','league','game','market','selection','line','prob','prob_decimal_odds','confidence','rationale'])
+MAX_LEGS = 5          # hasta 5
+TARGET_DEC_ODDS = 2.5 # cuota objetivo (decimal) del parlay
+MARGIN = 0.95         # conservadurismo (reduce la cuota justa)
 
-picks=safe_load_picks().drop_duplicates(subset=['game'])
-if picks.empty:
-    pd.DataFrame(columns=['date','sport','league','game','market','selection','line','prob','prob_decimal_odds','confidence','rationale','parlay_prob','parlay_decimal_odds','note']).to_csv('reports/parlay.csv', index=False)
-    print('parlay ok – 0 (sin picks)'); raise SystemExit(0)
+def load_picks():
+    f = REPORTS/"picks.csv"
+    if not f.exists() or f.stat().st_size == 0:
+        return pd.DataFrame()
+    return pd.read_csv(f)
 
-picks=picks.sort_values('prob', ascending=False)
-target_odds=PREFS.get('parlay_min_combined_odds',2.5); min_prob=PREFS.get('parlay_min_combined_prob',0.55)
-best=None
-for k in [5,4,3,2]:
-    if len(picks)<k: continue
-    for combo in combinations(picks.index, k):
-        sub=picks.loc[list(combo)].copy()
-        p_joint=sub['prob'].prod(); dec_odds=(1.0/sub['prob']).prod()
-        if dec_odds>=target_odds and p_joint>=min_prob:
-            sub['parlay_prob']=p_joint; sub['parlay_decimal_odds']=dec_odds; best=sub; break
-    if best is not None: break
-if best is None and len(picks)>=2:
-    sub=picks.head(2).copy(); sub['parlay_prob']=sub['prob'].prod(); sub['parlay_decimal_odds']=(1.0/sub['prob']).prod(); best=sub
-(best if best is not None else picks.head(0)).assign(note='Parlay generado').to_csv('reports/parlay.csv', index=False)
-print('parlay ok')
+def parlay_metrics(probs):
+    p_parlay = float(np.prod(probs))
+    dec_fair  = 1.0 / max(p_parlay, 1e-6)
+    dec_cons  = dec_fair * MARGIN
+    return p_parlay, dec_cons
+
+def main():
+    picks = load_picks()
+    if picks.empty:
+        print("parlay ok – 0 (sin picks)")
+        (REPORTS/"parlay.csv").write_text("")
+        return
+
+    # Greedy: añade de mayor a menor prob hasta alcanzar cuota objetivo o 5 legs
+    pool = picks.sort_values("prob", ascending=False).copy()
+    legs = []
+    probs = []
+
+    for _, row in pool.iterrows():
+        if len(legs) >= MAX_LEGS:
+            break
+        legs.append(row)
+        probs.append(float(row["prob"]))
+        _, dec = parlay_metrics(probs)
+        if dec >= TARGET_DEC_ODDS and len(legs) >= 2:
+            break
+
+    legs = pd.DataFrame(legs)
+    p, dec = parlay_metrics(legs["prob"].astype(float).values)
+    legs["parlay_prob"] = round(p, 4)
+    legs["parlay_decimal_odds"] = round(dec, 3)
+    legs["note"] = "Parlay segurito (modelo puro, sin odds)."
+
+    out = REPORTS/"parlay.csv"
+    legs.to_csv(out, index=False)
+    print(f"parlay ok – {len(legs)} -> {out}")
+
+if __name__ == "__main__":
+    main()
