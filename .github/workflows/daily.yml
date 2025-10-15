@@ -16,6 +16,7 @@ jobs:
       # Exponemos secrets como ENV de JOB
       ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
       PANDASCORE_TOKEN: ${{ secrets.PANDASCORE_TOKEN }}
+       APIFOOTBALL_KEY: ${{ secrets.APIFOOTBALL_KEY }}
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
       HF_SPACE: ${{ secrets.HF_SPACE }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
