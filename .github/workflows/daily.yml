@@ -1,7 +1,7 @@
 name: daily
 on:
   schedule:
-    - cron: "0 12 * * *"   # 12:00 UTC diario
+    - cron: '0 12 * * *'   # 12:00 UTC diario
   workflow_dispatch: {}
 
 concurrency:
@@ -13,21 +13,20 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      # Exponemos secrets como ENV de JOB
-  ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
-  PANDASCORE_TOKEN: ${{ secrets.PANDASCORE_TOKEN }}
-  APIFOOTBALL_KEY: ${{ secrets.APIFOOTBALL_KEY }}   # <- incluido
-  HF_TOKEN: ${{ secrets.HF_TOKEN }}
-  HF_SPACE: ${{ secrets.HF_SPACE }}
-  TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-  TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-
-steps:
+      # Exponemos secrets como variables del JOB
+      ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+      PANDASCORE_TOKEN: ${{ secrets.PANDASCORE_TOKEN }}
+      APIFOOTBALL_KEY: ${{ secrets.APIFOOTBALL_KEY }}
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      HF_SPACE: ${{ secrets.HF_SPACE }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+    steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
       - name: Install deps
         run: |
@@ -37,7 +36,8 @@ steps:
       - name: Preflight secrets
         run: |
           [ -n "$ODDS_API_KEY" ] && echo "ODDS_API_KEY: OK" || echo "::warning::ODDS_API_KEY faltante"
-          [ -n "$PANDASCORE_TOKEN" ] && echo "PANDASCORE_TOKEN: OK" || echo "PANDASCORE_TOKEN faltante (solo e-sports)"
+          [ -n "$PANDASCORE_TOKEN" ] && echo "PANDASCORE_TOKEN: OK" || echo "PANDASCORE_TOKEN faltante (e-sports)"
+          [ -n "$APIFOOTBALL_KEY" ] && echo "APIFOOTBALL_KEY: OK" || echo "::warning::APIFOOTBALL_KEY faltante (fútbol)"
           [ -n "$HF_TOKEN" ] && echo "HF_TOKEN: OK" || echo "::warning::HF_TOKEN faltante"
           [ -n "$HF_SPACE" ] && echo "HF_SPACE: OK" || echo "::warning::HF_SPACE faltante"
           if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then echo "Telegram: OK"; else echo "Telegram: no configurado"; fi
@@ -69,7 +69,6 @@ steps:
       - name: Notify Telegram (robusto)
         run: |
           set -e
-          # Si no hay credenciales, omitir sin fallar
           if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
             echo "Telegram no configurado; omitiendo notificación."
             exit 0
@@ -81,4 +80,3 @@ steps:
           CODE=$(echo "$RES" | tail -n1); BODY=$(echo "$RES" | head -n1)
           echo "HTTP $CODE"; echo "$BODY"
           test "$CODE" = "200"
-
