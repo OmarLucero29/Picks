@@ -1,65 +1,79 @@
-# serving/select_picks.py — robusto, usa SOLO prob del MODELO y sin filtros
+# serving/select_picks.py — genera TODOS los picks (ordenados) y TOP-M
 from pathlib import Path
 import pandas as pd
 import numpy as np
 from datetime import datetime, timezone
+import os
 
 DATA = Path("data/processed")
 REPORTS = Path("reports"); REPORTS.mkdir(parents=True, exist_ok=True)
 
-MAX_PICKS = 5  # siempre intentamos 5
+MAX_PICKS = int(os.environ.get("MAX_PICKS", "5"))  # Top-M configurable
 
-# Candidatos de columnas de prob. del MODELO (0..1)
-PROB_CANDIDATES_SINGLE = [
-    "prob_model","model_prob","pred_prob","win_prob","prob","p","prediction","yhat_proba"
-]
-# Candidatos cuando hay una fila por partido y prob para cada lado:
-HOME_PROB_CANDS = ["p_home","prob_home","home_prob","home_win_prob","ph","win_home"]
-AWAY_PROB_CANDS = ["p_away","prob_away","away_prob","away_win_prob","pa","win_away"]
+# Heurísticas de nombres de prob del MODELO
+PROB_SINGLE = ["prob_model","model_prob","pred_prob","win_prob","prob","p","prediction","yhat_proba","proba"]
+HOME_PROB  = ["p_home","prob_home","home_prob","home_win_prob","ph","win_home","proba_home"]
+AWAY_PROB  = ["p_away","prob_away","away_prob","away_win_prob","pa","win_away","proba_away"]
 
 def _read_preds():
     f = DATA / "predictions.csv"
     if not f.exists() or f.stat().st_size == 0:
         print("select_picks: predictions.csv no existe o vacío")
         return pd.DataFrame()
-    df = pd.read_csv(f)
-    # Limpieza básica
-    df = df.replace([np.inf, -np.inf], np.nan)
+    df = pd.read_csv(f).replace([np.inf,-np.inf], np.nan)
+    print(f"select_picks: cols => {list(df.columns)}")
     return df
 
-def _clamp_prob(x):
-    try:
-        x = float(x)
-    except Exception:
-        return np.nan
-    if x <= 0 or x >= 1:
-        return np.nan
-    return x
+def _clamp01(x):
+    try: x = float(x)
+    except Exception: return np.nan
+    return x if 0 < x < 1 else np.nan
 
-def _detect_single_prob_col(df):
-    for c in PROB_CANDIDATES_SINGLE:
+def _detect_single_prob(df):
+    for c in PROB_SINGLE:
         if c in df.columns:
-            p = df[c].apply(_clamp_prob)
-            if p.notna().any():
-                print(f"select_picks: usando prob col = '{c}'")
+            p = df[c].apply(_clamp01)
+            if p.notna().sum() >= 1:
+                print(f"select_picks: usando prob única = '{c}' (válidas={int(p.notna().sum())})")
                 return c
     return None
 
-def _detect_dual_prob_cols(df):
-    h = next((c for c in HOME_PROB_CANDS if c in df.columns), None)
-    a = next((c for c in AWAY_PROB_CANDS if c in df.columns), None)
+def _detect_dual_prob(df):
+    h = next((c for c in HOME_PROB if c in df.columns), None)
+    a = next((c for c in AWAY_PROB if c in df.columns), None)
     if h and a:
-        hp = df[h].apply(_clamp_prob)
-        ap = df[a].apply(_clamp_prob)
-        if hp.notna().any() or ap.notna().any():
+        hp = df[h].apply(_clamp01); ap = df[a].apply(_clamp01)
+        if max(hp.notna().sum(), ap.notna().sum()) >= 1:
             print(f"select_picks: usando prob dual = ('{h}','{a}')")
             return h, a
     return None, None
 
+def _best_numeric_prob(df):
+    # Busca cualquier columna numérica en (0,1) con más cobertura
+    best, best_cnt = None, 0
+    for c in df.columns:
+        if df[c].dtype.kind in "fc":
+            p = df[c].apply(_clamp01)
+            cnt = p.notna().sum()
+            if cnt > best_cnt:
+                best, best_cnt = c, cnt
+    if best:
+        print(f"select_picks: mejor numérica en (0,1) => '{best}' (válidas={best_cnt})")
+    return best
+
+def _normalize_from_score(df):
+    if "score" in df.columns and df["score"].notna().sum() >= 1:
+        s = df["score"].astype(float)
+        mn, mx = s.min(), s.max()
+        if mx > mn:
+            p = 0.05 + 0.9 * (s - mn) / (mx - mn)
+            print("select_picks: usando 'score' normalizado como prob (fallback)")
+            return p
+    return pd.Series(dtype=float)
+
 def _ensure_cols(df, cols):
     for c in cols:
-        if c not in df.columns:
-            df[c] = ""
+        if c not in df.columns: df[c] = ""
     return df
 
 def _mk_game(home, away):
@@ -68,138 +82,115 @@ def _mk_game(home, away):
     return f"{away} @ {home}"
 
 def _mk_date(dt_iso):
-    # produce DD/MM/YYYY (MX) a partir de start_time_utc o fecha
-    if pd.isna(dt_iso):
-        return datetime.now(timezone.utc).strftime("%d/%m/%Y")
-    try:
-        ts = pd.to_datetime(dt_iso, utc=True)
-        return ts.strftime("%d/%m/%Y")
-    except Exception:
-        return datetime.now(timezone.utc).strftime("%d/%m/%Y")
+    try: ts = pd.to_datetime(dt_iso, utc=True)
+    except Exception: ts = datetime.now(timezone.utc)
+    return ts.strftime("%d/%m/%Y")
 
-def build_long_from_dual(df, hcol, acol):
-    # Requiere columnas 'home' y 'away' o similares
-    home_name = None
-    away_name = None
-    for cand in ["home","home_team","team_home","local"]:
-        if cand in df.columns: home_name = cand; break
-    for cand in ["away","away_team","team_away","visitante","visitor"]:
-        if cand in df.columns: away_name = cand; break
+def _build_long_from_dual(raw, hcol, acol):
+    hname = next((c for c in ["home","home_team","team_home","local"] if c in raw.columns), None)
+    aname = next((c for c in ["away","away_team","team_away","visitante","visitor"] if c in raw.columns), None)
+    base = [c for c in raw.columns if c not in [hcol, acol]]
+    home_rows = raw[base].copy(); away_rows = raw[base].copy()
 
-    # Si no hay columnas claras, intenta usar 'selection_home/selection_away' inexistentes → fallback
-    if home_name is None or away_name is None:
-        # Fallback: usa selection si existiera (no ideal)
-        df["game"] = df.get("game", "")
-        df["selection"] = df.get("selection", "")
-        df["p"] = df[hcol].apply(_clamp_prob).fillna(df[acol].apply(_clamp_prob))
-        return df
+    if hname and aname:
+        home_rows["selection"] = raw[hname]; away_rows["selection"] = raw[aname]
+        game_series = [ _mk_game(h,a) for h,a in zip(raw[hname], raw[aname]) ]
+    else:
+        home_rows["selection"] = "Home"; away_rows["selection"] = "Away"
+        game_series = raw.get("game", pd.Series([""]*len(raw))).tolist()
 
-    # Unpivot a dos filas por partido (home y away)
-    base_cols = [c for c in df.columns if c not in [hcol, acol]]
-    home_rows = df[base_cols].copy()
-    home_rows["selection"] = df[home_name]
-    home_rows["p"] = df[hcol].apply(_clamp_prob)
-
-    away_rows = df[base_cols].copy()
-    away_rows["selection"] = df[away_name]
-    away_rows["p"] = df[acol].apply(_clamp_prob)
+    home_rows["p"] = raw[hcol].apply(_clamp01)
+    away_rows["p"] = raw[acol].apply(_clamp01)
 
     long_df = pd.concat([home_rows, away_rows], ignore_index=True)
-    # game
-    if "game" not in long_df.columns or long_df["game"].eq("").all():
-        long_df["game"] = _mk_game(df.get(home_name), df.get(away_name))
-        # _mk_game con Series no concatena bien; si quedó raro, recomputamos fila a fila
-        if not isinstance(long_df["game"].iloc[0], str):
-            long_df["game"] = [ _mk_game(h, a) for h,a in zip(df.get(home_name,""), df.get(away_name,"")) ] * 2
+    if "game" not in long_df.columns or long_df["game"].replace("", np.nan).isna().any():
+        long_df["game"] = game_series + game_series
     return long_df
 
-def main():
+def build_all_picks():
     raw = _read_preds()
-    if raw.empty:
-        (REPORTS/"picks.csv").write_text("")
-        print("picks ok – 0 (predictions vacío)")
-        return
+    if raw.empty: return pd.DataFrame()
 
-    # Detecta formato
-    single = _detect_single_prob_col(raw)
+    # 1) single?
+    single = _detect_single_prob(raw)
     if single:
-        df = raw.copy()
-        df["p"] = df[single].apply(_clamp_prob)
-
-        # Si existe una única fila por partido sin selection, intenta inferir selección ganadora si hay 'winner' o 'pick'
-        if "selection" not in df.columns or df["selection"].replace("", np.nan).isna().all():
-            # intenta usar 'pick' o 'team'
-            sel_cand = next((c for c in ["pick","team","pred_team","winner","side"] if c in df.columns), None)
-            if sel_cand:
-                df["selection"] = df[sel_cand].fillna("")
-            # si aún falta y existen home/away + prob home/away separadas, reconvertimos
-            hcol, acol = _detect_dual_prob_cols(raw)
-            if hcol and acol:
-                df = build_long_from_dual(raw, hcol, acol)
-
+        df = raw.copy(); df["p"] = df[single].apply(_clamp01)
     else:
-        # No hay prob simple; buscamos dual home/away
-        hcol, acol = _detect_dual_prob_cols(raw)
-        if not (hcol and acol):
-            print("select_picks: no se detectó columna de probabilidad válida")
-            (REPORTS/"picks.csv").write_text("")
-            print("picks ok – 0")
-            return
-        df = build_long_from_dual(raw, hcol, acol)
+        # 2) dual?
+        hcol, acol = _detect_dual_prob(raw)
+        if hcol and acol:
+            df = _build_long_from_dual(raw, hcol, acol)
+        else:
+            # 3) mejor numérica (0,1)
+            best = _best_numeric_prob(raw)
+            if best:
+                df = raw.copy(); df["p"] = df[best].apply(_clamp01)
+            else:
+                # 4) fallback: score
+                pscore = _normalize_from_score(raw)
+                if pscore.empty or pscore.notna().sum() < 1:
+                    print("select_picks: no hay columna de prob ni score util → 0")
+                    return pd.DataFrame()
+                df = raw.copy(); df["p"] = pscore
 
-    # Limpiar y asegurar columnas base
+    # limpiar
     df = df.dropna(subset=["p"])
     df = df[(df["p"] > 0) & (df["p"] < 1)].copy()
-    df = _ensure_cols(df, ["date","sport","league","game","market","selection","line"])
 
-    # market por defecto
+    # columnas base
+    df = _ensure_cols(df, ["date","sport","league","game","market","selection","line"])
     if df["market"].replace("", np.nan).isna().all():
         df["market"] = "ML"
 
-    # game si faltó
+    # game si falta y tenemos home/away
     if df["game"].replace("", np.nan).isna().any():
-        # intenta construir con home/away
-        home = None; away = None
-        for cand in ["home","home_team","team_home","local"]:
-            if cand in df.columns: home = cand; break
-        for cand in ["away","away_team","team_away","visitante","visitor"]:
-            if cand in df.columns: away = cand; break
-        if home and away:
-            df.loc[:, "game"] = [ _mk_game(h, a) for h, a in zip(df[home], df[away]) ]
+        hname = next((c for c in ["home","home_team","team_home","local"] if c in df.columns), None)
+        aname = next((c for c in ["away","away_team","team_away","visitante","visitor"] if c in df.columns), None)
+        if hname and aname:
+            df["game"] = [ _mk_game(h,a) for h,a in zip(df[hname], df[aname]) ]
         else:
-            df.loc[:, "game"] = df.get("game", "").fillna("")
+            df["game"] = df["game"].fillna("")
 
-    # date desde start_time_utc si existe
-    if "date" not in df.columns or df["date"].replace("", np.nan).isna().any():
-        src = "start_time_utc" if "start_time_utc" in df.columns else None
-        if src:
-            df["date"] = df[src].apply(_mk_date)
-        else:
-            df["date"] = datetime.now(timezone.utc).strftime("%d/%m/%Y")
+    # fecha preferente desde start_time_utc
+    if "start_time_utc" in df.columns:
+        df["date"] = df["start_time_utc"].apply(_mk_date)
+    else:
+        df["date"] = datetime.now(timezone.utc).strftime("%d/%m/%Y")
 
-    # Ordenar por prob del modelo y tomar top-5 (sin filtros)
+    # métricas derivadas
+    df["prob"] = df["p"].round(2)
+    df["prob_decimal_odds"] = (1.0 / df["p"].clip(1e-6, 1-1e-6)).round(3)
+    df["confidence"] = np.where(df["prob"]>=0.64,"Alta", np.where(df["prob"]>=0.58,"Media","Baja"))
+    df["rationale"] = "Predicción 100% del modelo (sin odds)."
+
+    # ordenar por prob desc y deduplicar selecciones idénticas del mismo juego
     df = df.sort_values("p", ascending=False).drop_duplicates(subset=["game","market","selection"], keep="first")
-    top = df.head(MAX_PICKS).copy()
 
-    if top.empty:
-        (REPORTS/"picks.csv").write_text("")
-        print("picks ok – 0")
-        return
-
-    top["prob"] = top["p"].round(2)
-    top["prob_decimal_odds"] = (1.0 / top["p"].clip(1e-6, 1-1e-6)).round(3)
-    top["confidence"] = np.where(top["prob"]>=0.64,"Alta", np.where(top["prob"]>=0.58,"Media","Baja"))
-    top["rationale"] = "Predicción 100% modelo (sin odds), con forma y ajustes."
-
+    # columnas finales
     cols = ["date","sport","league","game","market","selection","line",
             "prob","prob_decimal_odds","confidence","rationale"]
     for c in cols:
-        if c not in top.columns: top[c] = ""
-    top = top[cols]
+        if c not in df.columns: df[c] = ""
+    return df[cols]
 
-    out = REPORTS/"picks.csv"
-    top.to_csv(out, index=False)
-    print(f"picks ok – {len(top)} -> {out}")
+def main():
+    all_df = build_all_picks()
+    if all_df.empty:
+        (REPORTS/"all_picks.csv").write_text("")
+        (REPORTS/"picks.csv").write_text("")
+        print("picks ok – 0 (no hay candidatos)")
+        return
+
+    # escribe TODOS
+    all_out = REPORTS/"all_picks.csv"
+    all_df.to_csv(all_out, index=False)
+    print(f"all_picks ok – {len(all_df)} -> {all_out}")
+
+    # TOP-M
+    top = all_df.head(MAX_PICKS).copy()
+    top_out = REPORTS/"picks.csv"
+    top.to_csv(top_out, index=False)
+    print(f"picks ok – {len(top)} -> {top_out}")
 
 if __name__ == "__main__":
     main()
