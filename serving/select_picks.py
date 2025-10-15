@@ -1,54 +1,65 @@
-import pandas as pd, numpy as np
+# serving/select_picks.py — usa SOLO la prob del modelo, sin filtros
 from pathlib import Path
-from pandas.errors import EmptyDataError
+import pandas as pd
+import numpy as np
 
-PROC=Path('data/processed'); REPORTS=Path('reports'); REPORTS.mkdir(parents=True, exist_ok=True)
+DATA = Path("data/processed")
+REPORTS = Path("reports"); REPORTS.mkdir(parents=True, exist_ok=True)
 
-def fair_odds(p): p=max(min(p,0.999),0.001); return 1.0/p
+MAX_PICKS = 5  # siempre 5 picks
 
-def safe_read_preds():
-    p = PROC/'predictions.csv'
-    if not p.exists() or p.stat().st_size==0:
-        return pd.DataFrame(columns=['date','sport','league','game','winner','p_win','total','ou_pick','delta_total','spread'])
-    try:
-        return pd.read_csv(p)
-    except EmptyDataError:
-        return pd.DataFrame(columns=['date','sport','league','game','winner','p_win','total','ou_pick','delta_total','spread'])
+def load_preds():
+    f = DATA / "predictions.csv"
+    if not f.exists() or f.stat().st_size == 0:
+        print("picks ok – 0 (no hay predictions.csv)")
+        (REPORTS/"picks.csv").write_text("")
+        return pd.DataFrame()
+    df = pd.read_csv(f)
 
-preds = safe_read_preds()
-if preds.empty:
-    # escribir archivo de salida vacío pero con columnas correctas
-    cols=['date','sport','league','game','market','selection','line','prob','prob_decimal_odds','confidence','rationale']
-    pd.DataFrame(columns=cols).to_csv('reports/picks.csv', index=False)
-    print('picks ok – 0 (no hay eventos)'); raise SystemExit(0)
+    # Columna de probabilidad del MODELO (sin odds). Prioriza 'prob_model' si existe.
+    if "prob_model" in df.columns:
+        df["p"] = df["prob_model"].astype(float)
+    elif "prob" in df.columns:
+        df["p"] = df["prob"].astype(float)
+    else:
+        df["p"] = np.nan
 
-preds = preds.sort_values('p_win', ascending=False)
+    # Normaliza columnas mínimas
+    for c in ["date","sport","league","game","market","selection","line"]:
+        if c not in df.columns:
+            df[c] = ""
+    df = df.dropna(subset=["p"])
+    return df
 
-chosen=[]; used_games=set(); used_leagues=set()
-for _,r in preds.iterrows():
-    if len(chosen)>=5: break
-    if r['game'] in used_games: continue
-    if r['league'] in used_leagues and len(chosen)<3: 
-        continue
-    chosen.append(r); used_games.add(r['game']); used_leagues.add(r['league'])
+def main():
+    df = load_preds()
+    if df.empty:
+        return
 
-if len(chosen)<5:
-    for _,r in preds.iterrows():
-        if len(chosen)>=5: break
-        if r['game'] in used_games: continue
-        chosen.append(r); used_games.add(r['game'])
+    # NO filtros: ordenar por prob desc y tomar TOP-5 (evitando duplicar el mismo juego)
+    df = df.sort_values("p", ascending=False).copy()
+    if "game" in df.columns:
+        df = df.drop_duplicates(subset=["game","market","selection"], keep="first")
 
-base=pd.DataFrame(chosen[:5]).copy()
-if base.empty:
-    cols=['date','sport','league','game','market','selection','line','prob','prob_decimal_odds','confidence','rationale']
-    pd.DataFrame(columns=cols).to_csv('reports/picks.csv', index=False)
-    print('picks ok – 0'); raise SystemExit(0)
+    top = df.head(MAX_PICKS).copy()
 
-picks=base.rename(columns={'winner':'selection','p_win':'prob'})
-picks['market']='ML'; picks['line']=''
-picks['prob_decimal_odds']=picks['prob'].apply(fair_odds)
-picks['confidence']=np.where(picks['prob']>=0.7,'Alta',np.where(picks['prob']>=0.6,'Media','Baja'))
-picks['rationale']="Predicción basada en odds ajustadas y baselines históricos por deporte/competencia."
-cols=['date','sport','league','game','market','selection','line','prob','prob_decimal_odds','confidence','rationale']
-picks[cols].to_csv('reports/picks.csv', index=False)
-print('picks ok –', len(picks))
+    # Campos de salida
+    top["prob"] = top["p"].round(2)
+    top["prob_decimal_odds"] = (1.0 / top["p"].clip(1e-6, 1-1e-6)).round(3)
+    top["confidence"] = np.where(top["prob"]>=0.64,"Alta",np.where(top["prob"]>=0.58,"Media","Baja"))
+    top["rationale"] = (
+        "Predicción basada en el modelo (datos recientes, forma y ajustes)."
+    )
+
+    cols = ["date","sport","league","game","market","selection","line",
+            "prob","prob_decimal_odds","confidence","rationale"]
+    for c in cols:
+        if c not in top.columns: top[c] = ""
+    top = top[cols]
+
+    out = REPORTS/"picks.csv"
+    top.to_csv(out, index=False)
+    print(f"picks ok – {len(top)} -> {out}")
+
+if __name__ == "__main__":
+    main()
