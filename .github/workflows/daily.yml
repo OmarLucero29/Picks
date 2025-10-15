@@ -57,6 +57,14 @@ jobs:
       - name: Build Parlay
         run: python serving/parlay_builder.py
 
+      - name: Append to Google Sheets
+        env:
+          GCP_SA_JSON: ${{ secrets.GCP_SA_JSON }}
+          GSHEET_ID: ${{ secrets.GSHEET_ID }}
+          GSHEET_PICKS_TAB: Picks
+          GSHEET_PARLAY_TAB: Parlay
+        run: python serving/sheets_append.py
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
