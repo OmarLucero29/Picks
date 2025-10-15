@@ -1,7 +1,7 @@
 name: weekly
 on:
   schedule:
-    - cron: "0 7 * * 2"   # Martes 07:00 UTC (≈ 01:00 MX centro)
+    - cron: '0 7 * * 2'   # Martes 07:00 UTC
   workflow_dispatch: {}
 
 concurrency:
@@ -20,13 +20,12 @@ jobs:
       HF_SPACE: ${{ secrets.HF_SPACE }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
       - name: Install deps
         run: |
@@ -36,27 +35,22 @@ jobs:
       - name: Preflight secrets
         run: |
           [ -n "$ODDS_API_KEY" ] && echo "ODDS_API_KEY: OK" || echo "::warning::ODDS_API_KEY faltante"
-          [ -n "$PANDASCORE_TOKEN" ] && echo "PANDASCORE_TOKEN: OK" || echo "PANDASCORE_TOKEN faltante (solo e-sports)"
-          [ -n "$APIFOOTBALL_KEY" ] && echo "APIFOOTBALL_KEY: OK" || echo "::warning::APIFOOTBALL_KEY faltante (fútbol histórico)"
+          [ -n "$PANDASCORE_TOKEN" ] && echo "PANDASCORE_TOKEN: OK" || echo "PANDASCORE_TOKEN faltante (e-sports)"
+          [ -n "$APIFOOTBALL_KEY" ] && echo "APIFOOTBALL_KEY: OK" || echo "::warning::APIFOOTBALL_KEY faltante (fútbol)"
           [ -n "$HF_TOKEN" ] && echo "HF_TOKEN: OK" || echo "::warning::HF_TOKEN faltante"
           [ -n "$HF_SPACE" ] && echo "HF_SPACE: OK" || echo "::warning::HF_SPACE faltante"
           if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then echo "Telegram: OK"; else echo "Telegram: no configurado"; fi
 
       - name: Fetch historical TENNIS
         run: python pipelines/historical_tennis.py
-
       - name: Fetch historical NFL
         run: python pipelines/historical_nfl.py
-
       - name: Fetch historical NBA (balldontlie)
         run: python pipelines/historical_nba_balldontlie.py
-
       - name: Fetch historical MLB (statsapi)
         run: python pipelines/historical_mlb_statsapi.py
-
       - name: Fetch historical NHL (statsapi)
         run: python pipelines/historical_nhl_statsapi.py
-
       - name: Soccer recent history (180d)
         run: python pipelines/historical_soccer_apifootball.py
 
