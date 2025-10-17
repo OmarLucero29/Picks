@@ -1,7 +1,8 @@
 name: daily
+
 on:
   schedule:
-    - cron: '0 12 * * *'   # 12:00 UTC diario
+    - cron: "0 12 * * *"  # 12:00 UTC diario
   workflow_dispatch: {}
 
 concurrency:
@@ -11,22 +12,39 @@ concurrency:
 jobs:
   run-daily:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
-      # Exponemos secrets como variables del JOB
-      ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
-      PANDASCORE_TOKEN: ${{ secrets.PANDASCORE_TOKEN }}
-      APIFOOTBALL_KEY: ${{ secrets.APIFOOTBALL_KEY }}
+      # === Secrets / Vars ===
+      APISPORTS_KEY: ${{ secrets.APISPORTS_KEY }}
+      GCP_SA_JSON: ${{ secrets.GCP_SA_JSON }}
+      GSHEET_ID: ${{ secrets.GSHEET_ID }}
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
       HF_SPACE: ${{ secrets.HF_SPACE }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+      # === Parámetros ===
+      MAX_PICKS: "5"
+      PARLAY_LEGS: "3"
+      PARLAY_LEGS_DREAM: "5"
+      TARGET_DEC_ODDS: "2.5"
+      TARGET_DEC_ODDS_DREAM: "10.0"
+      STAKE_DEFAULT: "5%"
+      STAKE_SEGURITO: "5%"
+      STAKE_SONADORA: "2%"
+
+      # Tabs de Google Sheets
+      GSHEET_PICKS_TAB: "PICKS"
+      GSHEET_PARLAY_TAB: "PARLAYS"
+      GSHEET_SAVED_TAB: "PICKS_GUARDADOS"
+
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
       - name: Install deps
         run: |
@@ -35,14 +53,13 @@ jobs:
 
       - name: Preflight secrets
         run: |
-          [ -n "$ODDS_API_KEY" ] && echo "ODDS_API_KEY: OK" || echo "::warning::ODDS_API_KEY faltante"
-          [ -n "$PANDASCORE_TOKEN" ] && echo "PANDASCORE_TOKEN: OK" || echo "PANDASCORE_TOKEN faltante (e-sports)"
-          [ -n "$APIFOOTBALL_KEY" ] && echo "APIFOOTBALL_KEY: OK" || echo "::warning::APIFOOTBALL_KEY faltante (fútbol)"
+          [ -n "$APISPORTS_KEY" ] && echo "APISPORTS_KEY: OK" || (echo "::error::APISPORTS_KEY faltante" && exit 1)
+          [ -n "$GCP_SA_JSON" ] && echo "GCP_SA_JSON: OK" || echo "::warning::GCP_SA_JSON faltante"
+          [ -n "$GSHEET_ID" ] && echo "GSHEET_ID: OK" || echo "::warning::GSHEET_ID faltante"
           [ -n "$HF_TOKEN" ] && echo "HF_TOKEN: OK" || echo "::warning::HF_TOKEN faltante"
-          [ -n "$HF_SPACE" ] && echo "HF_SPACE: OK" || echo "::warning::HF_SPACE faltante"
-          if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then echo "Telegram: OK"; else echo "Telegram: no configurado"; fi
+          echo "Telegram: $([ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ] && echo OK || echo off)"
 
-      - name: Fetch upcoming (48h)
+      - name: Fetch upcoming (48-72h) + results D-1
         run: python pipelines/fetch_all.py --mode daily
 
       - name: Build features
@@ -51,18 +68,19 @@ jobs:
       - name: Predict
         run: python models/predict.py
 
-      - name: Select Top-5
+      - name: Select Picks
         run: python serving/select_picks.py
 
-      - name: Build Parlay
+      - name: Build Parlays
         run: python serving/parlay_builder.py
 
       - name: Append to Google Sheets
         env:
           GCP_SA_JSON: ${{ secrets.GCP_SA_JSON }}
           GSHEET_ID: ${{ secrets.GSHEET_ID }}
-          GSHEET_PICKS_TAB: Picks
-          GSHEET_PARLAY_TAB: Parlay
+          GSHEET_PICKS_TAB: "PICKS"
+          GSHEET_PARLAY_TAB: "PARLAYS"
+          GSHEET_SAVED_TAB: "PICKS_GUARDADOS"
         run: python serving/sheets_append.py
 
       - name: Upload artifacts
@@ -71,20 +89,9 @@ jobs:
           name: daily_outputs
           path: reports/
 
-      - name: Sync to Hugging Face
-        run: python serving/sync_hf.py
-
-      - name: Notify Telegram (robusto)
+      - name: Notify Telegram
+        if: ${{ env.TELEGRAM_BOT_TOKEN != '' && env.TELEGRAM_CHAT_ID != '' }}
         run: |
-          set -e
-          if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
-            echo "Telegram no configurado; omitiendo notificación."
-            exit 0
-          fi
-          echo "Enviando mensaje a Telegram…"
-          RES=$(curl -s -w "\n%{http_code}" -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-            -d chat_id="${TELEGRAM_CHAT_ID}" \
-            -d text="✅ Picks y Parlay publicados. Space: ${HF_SPACE}")
-          CODE=$(echo "$RES" | tail -n1); BODY=$(echo "$RES" | head -n1)
-          echo "HTTP $CODE"; echo "$BODY"
-          test "$CODE" = "200"
+          TXT="✅ Picks y Parlays generados.\nSpace: ${HF_SPACE}"
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" -d text="$TXT" >/dev/null || true
