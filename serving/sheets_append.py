@@ -1,5 +1,5 @@
-# serving/sheets_append.py
-import os, json, base64
+# serving/sheets_append.py — upsert a Sheets con nuevas columnas sencillas
+import os, json, base64, hashlib
 from pathlib import Path
 import pandas as pd
 import gspread
@@ -8,120 +8,90 @@ from gspread_dataframe import set_with_dataframe, get_as_dataframe
 
 REPORTS = Path("reports")
 
-SHEET_ID = os.environ.get("GSHEET_ID", "")
-TAB_PICKS = os.environ.get("GSHEET_PICKS_TAB", "Picks")
-TAB_PARLAY = os.environ.get("GSHEET_PARLAY_TAB", "Parlay")
-SA_JSON = os.environ.get("GCP_SA_JSON", "")
+SHEET_ID = os.getenv("GSHEET_ID", "")
+TAB_PICKS = os.getenv("GSHEET_PICKS_TAB", "PICKS")
+TAB_PARLAY = os.getenv("GSHEET_PARLAY_TAB", "PARLAYS")
+TAB_SAVED  = os.getenv("GSHEET_SAVED_TAB", "PICKS_GUARDADOS")  # para el botón "Avísame"
 
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
-]
+SA_JSON = os.getenv("GCP_SA_JSON", "")
 
-def load_service_account():
-    if not SA_JSON:
-        raise RuntimeError("GCP_SA_JSON faltante")
-    # Acepta JSON plano o base64
+# Columnas estándar pedidas
+PICKS_COLS  = ["ID","FECHA","DEPORTE","PARTIDO","MERCADO","PICK","CUOTA (PROB %)","STAKE"]
+PARLAY_COLS = ["ID","TIPO","FECHA","DEPORTE","PARTIDO","MERCADO","PICK","CUOTA (PROB %)","STAKE"]
+
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets",
+          "https://www.googleapis.com/auth/drive"]
+
+def gclient():
+    if not SA_JSON: raise RuntimeError("GCP_SA_JSON faltante")
     try:
         data = json.loads(SA_JSON)
     except json.JSONDecodeError:
         data = json.loads(base64.b64decode(SA_JSON).decode("utf-8"))
     creds = Credentials.from_service_account_info(data, scopes=SCOPES)
-    gc = gspread.authorize(creds)
-    return gc
+    return gspread.authorize(creds)
 
-def append_df(ws, df: pd.DataFrame, dedup_cols=None):
-    """
-    Anexa df al final. Si la hoja está vacía, escribe encabezados.
-    Si dedup_cols, hace merge con datos existentes y elimina duplicados conservando lo más reciente.
-    """
-    # Lee existente (si hay)
+def row_hash(row, cols):
+    s = "|".join(str(row.get(c,"")) for c in cols)
+    return hashlib.sha1(s.encode("utf-8")).hexdigest()
+
+def ensure_cols(df, cols):
+    for c in cols:
+        if c not in df.columns: df[c] = pd.NA
+    return df[cols]
+
+def upsert(ws, df: pd.DataFrame, key_cols):
     try:
-        existing = get_as_dataframe(ws, evaluate_formulas=False, header=0)
+        existing = get_as_dataframe(ws, header=0).dropna(how="all")
     except Exception:
-        existing = pd.DataFrame()
-
-    # Limpia columnas vacías adicionales
-    if isinstance(existing, pd.DataFrame):
-        existing = existing.dropna(how="all")
-        # Alinea columnas si existen encabezados
-        if not existing.empty:
-            # normaliza tipos a str para evitar problemas
-            existing.columns = [str(c) for c in existing.columns]
-
-    if existing is None or existing.empty:
-        # Hoja vacía: escribe encabezados + df
-        set_with_dataframe(ws, df, include_index=False, include_column_header=True, allow_formulas=False)
-        return
-
-    # Alinea columnas
-    for c in df.columns:
-        if c not in existing.columns:
-            existing[c] = pd.NA
-    for c in existing.columns:
-        if c not in df.columns:
-            df[c] = pd.NA
-
-    # Concat y dedup
-    merged = pd.concat([existing[existing.columns], df[existing.columns]], ignore_index=True)
-    if dedup_cols:
-        merged = merged.drop_duplicates(subset=dedup_cols, keep="last")
-    # Reescribe todo (simple y robusto)
+        existing = pd.DataFrame(columns=df.columns)
+    df = df.copy()
+    df["_row_key"] = df.apply(lambda r: row_hash(r, key_cols), axis=1)
+    if "_row_key" not in existing.columns:
+        existing["_row_key"] = pd.NA
+    merged = pd.concat([existing, df], ignore_index=True)
+    merged = merged.drop_duplicates(subset=["_row_key"], keep="last")
+    # Mostrar columnas visibles + _row_key al final
+    vis = [c for c in df.columns if c != "_row_key"] + ["_row_key"]
     ws.clear()
-    set_with_dataframe(ws, merged, include_index=False, include_column_header=True, allow_formulas=False)
+    set_with_dataframe(ws, merged[vis], include_index=False, include_column_header=True, allow_formulas=False)
 
-def load_csv(path: Path, required_cols=None):
+def load_csv(path: Path, cols):
     if not path.exists() or path.stat().st_size == 0:
-        return pd.DataFrame(columns=required_cols or [])
-    try:
-        df = pd.read_csv(path)
-    except Exception:
-        return pd.DataFrame(columns=required_cols or [])
-    if required_cols:
-        # Asegura todas las columnas
-        for c in required_cols:
-            if c not in df.columns:
-                df[c] = pd.NA
-        df = df[required_cols]
-    return df
+        return pd.DataFrame(columns=cols)
+    df = pd.read_csv(path)
+    return ensure_cols(df, cols)
 
 def main():
-    # Definir columnas estándar
-    cols_picks = ["date","sport","league","game","market","selection","line","prob","prob_decimal_odds","confidence","rationale"]
-    cols_parlay = ["date","sport","league","game","market","selection","line","prob","prob_decimal_odds","confidence","rationale","parlay_prob","parlay_decimal_odds","note"]
-
-    picks_df = load_csv(REPORTS/"picks.csv", required_cols=cols_picks)
-    parlay_df = load_csv(REPORTS/"parlay.csv", required_cols=cols_parlay)
-
-    # Si no hay nada, no hacemos nada
-    if picks_df.empty and parlay_df.empty:
-        print("sheets: nada que enviar (picks y parlay vacíos)")
-        return
-
-    gc = load_service_account()
+    gc = gclient()
     sh = gc.open_by_key(SHEET_ID)
 
-    # Picks
+    # PICKS (todos)
+    picks_df = load_csv(REPORTS/"all_picks.csv", PICKS_COLS)
     if not picks_df.empty:
         try:
             ws = sh.worksheet(TAB_PICKS)
         except gspread.WorksheetNotFound:
-            ws = sh.add_worksheet(title=TAB_PICKS, rows=1000, cols=max(10, len(cols_picks)))
-        # deduplicar por combinación clave (fecha+partido+mercado+selección)
-        dedup_cols = ["date","game","market","selection"]
-        append_df(ws, picks_df, dedup_cols=dedup_cols)
-        print(f"sheets: picks enviados ({len(picks_df)} filas) -> {TAB_PICKS}")
+            ws = sh.add_worksheet(title=TAB_PICKS, rows=5000, cols=max(10,len(PICKS_COLS)+1))
+        upsert(ws, picks_df, key_cols=["ID"])
+        print(f"sheets: upsert {len(picks_df)} filas -> {TAB_PICKS}")
+    else:
+        print("sheets: no hay all_picks.csv")
 
-    # Parlay
+    # PARLAYS (Segurito + Soñadora)
+    parlay_df = load_csv(REPORTS/"parlay.csv", PARLAY_COLS)
     if not parlay_df.empty:
         try:
             ws2 = sh.worksheet(TAB_PARLAY)
         except gspread.WorksheetNotFound:
-            ws2 = sh.add_worksheet(title=TAB_PARLAY, rows=1000, cols=max(10, len(cols_parlay)))
-        # dedup simple por (date, selection, market) para no repetir
-        dedup_cols2 = ["date","selection","market"]
-        append_df(ws2, parlay_df, dedup_cols=dedup_cols2)
-        print(f"sheets: parlay enviado ({len(parlay_df)} filas) -> {TAB_PARLAY}")
+            ws2 = sh.add_worksheet(title=TAB_PARLAY, rows=5000, cols=max(10,len(PARLAY_COLS)+1))
+        # Dedupe por (ID + PICK) para no duplicar legs del mismo parlay
+        upsert(ws2, parlay_df, key_cols=["ID","PICK","PARTIDO","MERCADO"])
+        print(f"sheets: upsert {len(parlay_df)} filas -> {TAB_PARLAY}")
+    else:
+        print("sheets: no hay parlay.csv")
+
+    # NOTA: TAB_SAVED (PICKS_GUARDADOS) se llenará desde el bot con el botón "Avísame".
 
 if __name__ == "__main__":
     main()
