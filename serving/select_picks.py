@@ -1,17 +1,18 @@
-# serving/select_picks.py — todos los picks (ordenados) + Top-M; SIEMPRE define 'selection'
+# serving/select_picks.py — genera all_picks + picks (Top-M) con campos normalizados
 from pathlib import Path
 import pandas as pd
 import numpy as np
 from datetime import datetime, timezone
 import os
 import re
+import hashlib
 
 DATA = Path("data/processed")
 REPORTS = Path("reports"); REPORTS.mkdir(parents=True, exist_ok=True)
 
 MAX_PICKS = int(os.environ.get("MAX_PICKS", "5"))  # Top-M configurable
+DEFAULT_STAKE = os.environ.get("STAKE_DEFAULT", "5%")  # para picks
 
-# Heurísticas de nombres de prob del MODELO
 PROB_SINGLE = ["prob_model","model_prob","pred_prob","win_prob","prob","p","prediction","yhat_proba","proba"]
 HOME_PROB  = ["p_home","prob_home","home_prob","home_win_prob","ph","win_home","proba_home"]
 AWAY_PROB  = ["p_away","prob_away","away_prob","away_win_prob","pa","win_away","proba_away"]
@@ -74,10 +75,7 @@ def _normalize_from_score(df):
             return p
     return pd.Series(dtype=float)
 
-def _ensure_cols(df, cols):
-    for c in cols:
-        if c not in df.columns: df[c] = ""
-    return df
+def _get_col(df, cands): return next((c for c in cands if c in df.columns), None)
 
 def _mk_game(home, away):
     home = home if isinstance(home,str) and home else "Home"
@@ -85,21 +83,20 @@ def _mk_game(home, away):
     return f"{away} @ {home}"
 
 def _split_from_game(game):
-    """Devuelve (away, home) si puede parsear el string del partido."""
     if not isinstance(game,str): return None, None
     g = game.strip()
     if "@" in g:
-        # Formato: Away @ Home
         parts = [p.strip() for p in g.split("@", 1)]
         if len(parts)==2: return parts[0], parts[1]
     if " vs " in g.lower():
-        # Formato: Team1 vs Team2 (home desconocido: asumimos Team2 es home)
         m = re.split(r"\s+vs\s+", g, flags=re.IGNORECASE)
         if len(m)==2: return m[0].strip(), m[1].strip()
     return None, None
 
-def _get_col(df, candidates):
-    return next((c for c in candidates if c in df.columns), None)
+def _ensure_cols(df, cols):
+    for c in cols:
+        if c not in df.columns: df[c] = ""
+    return df
 
 def _build_long_from_dual(raw, hcol, acol):
     hname = _get_col(raw, HOME_NAMES)
@@ -124,113 +121,125 @@ def _build_long_from_dual(raw, hcol, acol):
     return long_df
 
 def _infer_selection_single(df):
-    """Para caso de prob única: si hay home/away → p>=0.5 = home; si no, intenta parsear game."""
     if "selection" in df.columns and df["selection"].replace("",np.nan).notna().any():
-        return df  # ya hay selección en alguna fila
-
-    hname = _get_col(df, HOME_NAMES)
-    aname = _get_col(df, AWAY_NAMES)
-
+        return df
+    hname = _get_col(df, HOME_NAMES); aname = _get_col(df, AWAY_NAMES)
     if hname and aname:
         choice_is_home = df["p"] >= 0.5
         df.loc[choice_is_home, "selection"] = df.loc[choice_is_home, hname]
         df.loc[~choice_is_home, "selection"] = df.loc[~choice_is_home, aname]
         return df
-
-    # Sin columnas explícitas: intentar desde 'game'
     if "game" in df.columns:
         away_list, home_list = [], []
         for g in df["game"].fillna(""):
-            a, h = _split_from_game(g)
-            away_list.append(a); home_list.append(h)
-        away_s = pd.Series(away_list)
-        home_s = pd.Series(home_list)
-
-        # Donde sí pudimos parsear:
-        mask_parse = away_s.notna() & home_s.notna()
-        if mask_parse.any():
+            a, h = _split_from_game(g); away_list.append(a); home_list.append(h)
+        away_s = pd.Series(away_list); home_s = pd.Series(home_list)
+        mask = away_s.notna() & home_s.notna()
+        if mask.any():
             choice_is_home = df["p"] >= 0.5
             sel = np.where(choice_is_home, home_s, away_s)
-            df.loc[mask_parse, "selection"] = sel[mask_parse]
-
-    # Si aún hay vacíos, al menos marca "Home"/"Away" para no dejar en blanco
+            df.loc[mask, "selection"] = sel[mask]
     if "selection" not in df.columns or df["selection"].replace("",np.nan).isna().any():
         df["selection"] = df.get("selection","")
         df.loc[df["selection"].replace("",np.nan).isna(), "selection"] = np.where(df["p"]>=0.5, "Home", "Away")
-
     return df
+
+def _date_local_from(df):
+    # preferente start_time_utc → FECHA local (sin hora)
+    if "start_time_utc" in df.columns:
+        try:
+            dt = pd.to_datetime(df["start_time_utc"], utc=True, errors="coerce")
+            return dt.dt.tz_convert("America/Mexico_City").dt.strftime("%d/%m/%Y")
+        except Exception:
+            pass
+    return datetime.now(timezone.utc).astimezone().strftime("%d/%m/%Y")
+
+def _sport_from(df):
+    return df.get("sport","").fillna("")
+
+def _league_from(df):
+    return df.get("league","").fillna("")
 
 def build_all_picks():
     raw = _read_preds()
     if raw.empty: return pd.DataFrame()
 
-    # 1) single?
     single = _detect_single_prob(raw)
     if single:
         df = raw.copy(); df["p"] = df[single].apply(_clamp01)
         df = df.dropna(subset=["p"])
         df = _infer_selection_single(df)
     else:
-        # 2) dual?
         hcol, acol = _detect_dual_prob(raw)
         if hcol and acol:
             df = _build_long_from_dual(raw, hcol, acol)
         else:
-            # 3) mejor numérica (0,1)
             best = _best_numeric_prob(raw)
             if best:
                 df = raw.copy(); df["p"] = df[best].apply(_clamp01)
                 df = df.dropna(subset=["p"])
                 df = _infer_selection_single(df)
             else:
-                # 4) fallback: score
                 pscore = _normalize_from_score(raw)
                 if pscore.empty or pscore.notna().sum() < 1:
-                    print("select_picks: no hay columna de prob ni score util → 0")
+                    print("select_picks: no hay prob/score util → 0")
                     return pd.DataFrame()
                 df = raw.copy(); df["p"] = pscore
                 df = _infer_selection_single(df)
 
-    # limpiar
     df = df.dropna(subset=["p"])
     df = df[(df["p"] > 0) & (df["p"] < 1)].copy()
 
     # columnas base
-    df = _ensure_cols(df, ["date","sport","league","game","market","selection","line"])
-    if df["market"].replace("", np.nan).isna().all(): df["market"] = "ML"
+    for c in ["sport","league","game","market","selection"]:
+        if c not in df.columns: df[c] = ""
 
-    # construir 'game' si falta y tenemos home/away
+    # FECHA (solo fecha local)
+    date_local = _date_local_from(df)
+    df["FECHA"] = date_local if isinstance(date_local,str) else date_local
+
+    # DEPORTE
+    df["DEPORTE"] = _sport_from(df)
+    # PARTIDO
     if df["game"].replace("", np.nan).isna().any():
         hname = _get_col(df, HOME_NAMES); aname = _get_col(df, AWAY_NAMES)
         if hname and aname:
             df["game"] = [ _mk_game(h,a) for h,a in zip(df[hname], df[aname]) ]
-        else:
-            df["game"] = df["game"].fillna("")
+    df["PARTIDO"] = df["game"]
+    # MERCADO
+    df["MERCADO"] = df["market"].replace({"Moneyline":"ML","moneyline":"ML"}).fillna("ML")
+    # PICK
+    df["PICK"] = df["selection"].fillna("")
 
-    # fecha preferente desde start_time_utc
-    if "start_time_utc" in df.columns:
-        df["date"] = df["start_time_utc"].apply(_mk_date)
-    else:
-        df["date"] = datetime.now(timezone.utc).strftime("%d/%m/%Y")
+    # CUOTA (PROB %) — cuota derivada del modelo: 1/p
+    dec = (1.0 / df["p"].clip(1e-6, 1-1e-6)).round(2)
+    perc = (df["p"]*100).round(0).astype(int)
+    df["CUOTA (PROB %)"] = [f"{d:.2f} ({pp}%)" for d,pp in zip(dec, perc)]
 
-    # métricas derivadas
-    df["prob"] = df["p"].round(2)
-    df["prob_decimal_odds"] = (1.0 / df["p"].clip(1e-6, 1-1e-6)).round(3)
-    df["confidence"] = np.where(df["prob"]>=0.64,"Alta", np.where(df["prob"]>=0.58,"Media","Baja"))
-    df["rationale"] = "Predicción 100% del modelo (sin odds)."
+    # STAKE (por defecto)
+    df["STAKE"] = DEFAULT_STAKE
 
-    # ordenar por prob desc y deduplicar selecciones idénticas del mismo juego
-    df = df.sort_values("p", ascending=False).drop_duplicates(subset=["game","market","selection"], keep="first")
+    # ID estable (día + hash corto del partido/mercado/pick)
+    def _mk_id(row):
+        base = f"{row.get('FECHA','')}|{row.get('DEPORTE','')}|{row.get('PARTIDO','')}|{row.get('MERCADO','')}|{row.get('PICK','')}"
+        h = hashlib.sha1(base.encode("utf-8")).hexdigest()[:6].upper()
+        # prefijo P + yyyymmdd
+        try:
+            ymd = datetime.strptime(row.get("FECHA",""), "%d/%m/%Y").strftime("%Y%m%d")
+        except Exception:
+            ymd = datetime.now().strftime("%Y%m%d")
+        return f"P{ymd}-{h}"
+    df["ID"] = df.apply(_mk_id, axis=1)
 
-    # columnas finales
-    cols = ["date","sport","league","game","market","selection","line",
-            "prob","prob_decimal_odds","confidence","rationale"]
-    for c in cols:
-        if c not in df.columns: df[c] = ""
-    return df[cols]
+    # ordenar por prob desc y deduplicar
+    df = df.sort_values("p", ascending=False).drop_duplicates(subset=["ID"], keep="first")
+
+    # columnas finales (para Sheets)
+    final_cols = ["ID","FECHA","DEPORTE","PARTIDO","MERCADO","PICK","CUOTA (PROB %)","STAKE"]
+    return df[final_cols], df
 
 def main():
-    all_df = build_all_picks()
+    all_df, _raw = build_all_picks()
     if all_df.empty:
         (REPORTS/"all_picks.csv").write_text("")
         (REPORTS/"picks.csv").write_text("")
