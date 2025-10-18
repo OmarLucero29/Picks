@@ -1,21 +1,17 @@
 # pipelines/backfill.py
 """
-Backfill histórico ultrarrápido:
-- Async + httpx con pool de conexiones
-- Limitador global de tasa (throttle)
-- Ventanas from/to para football (APISports v3) -> 1 request por mes (con paginación)
-- Fallback por DÍA para deportes sin from/to (mlb/nfl/nba/nhl)
-- Concurrencia configurable y reanudable (no sobreescribe)
-- Salida:
-    data/historical/<sport>/<scope>_p{page}.json
-    data/historical/<sport>/index.csv
-Ejemplos:
-  python pipelines/backfill.py --sport soccer --years 2022-2024 --window-days 30 --concurrency 8
-  python pipelines/backfill.py --sport mlb,nfl --start 2023-04-01 --end 2023-10-01 --concurrency 8
+Backfill histórico ultrarrápido + comprimido:
+- Async + httpx (concurrencia controlada)
+- Rate limiter global (throttle)
+- Ventanas from/to para soccer (1 request mensual + paginación)
+- Día a día paralelizado para mlb/nfl/nba/nhl
+- Salida comprimida: *.json.gz (menor I/O)
+- Reanudable: no reescribe scopes ya guardados
+- Índice por deporte: data/historical/<sport>/index.csv
 """
 
 from __future__ import annotations
-import os, sys, json, math, argparse, asyncio, time
+import os, sys, json, math, argparse, asyncio, time, gzip
 from pathlib import Path
 from datetime import date, datetime, timedelta
 from typing import Dict, Any, List, Tuple
@@ -37,10 +33,11 @@ SPORT_MAP = {
     "nhl":    ("hockey","https://v1.hockey.api-sports.io","/games"),
 }
 
-DEFAULT_THROTTLE_MS = int(os.getenv("APISPORTS_THROTTLE_MS", "250"))  # ~4 rps
-DEFAULT_CONCURRENCY = int(os.getenv("APISPORTS_CONCURRENCY", "8"))
+DEFAULT_THROTTLE_MS   = int(os.getenv("APISPORTS_THROTTLE_MS", "250"))  # ~4 rps
+DEFAULT_CONCURRENCY   = int(os.getenv("APISPORTS_CONCURRENCY", "8"))
+DEFAULT_WINDOW_DAYS   = 30  # soccer from/to
 
-# ---------- utilidades de fechas ----------
+# ---------- fechas ----------
 def iter_dates(start: date, end: date):
     d = start
     while d <= end:
@@ -57,8 +54,7 @@ def parse_years(s: str) -> List[int]:
 def years_to_range(years: List[int]) -> Tuple[date, date]:
     return date(min(years), 1, 1), date(max(years), 12, 31)
 
-def month_windows(start: date, end: date, window_days: int = 30) -> List[Tuple[date, date]]:
-    """Divide [start, end] en ventanas de ~window_days (p.ej., aprox. mensual)."""
+def month_windows(start: date, end: date, window_days: int = DEFAULT_WINDOW_DAYS) -> List[Tuple[date, date]]:
     windows = []
     cur = start
     while cur <= end:
@@ -67,13 +63,12 @@ def month_windows(start: date, end: date, window_days: int = 30) -> List[Tuple[d
         cur = to + timedelta(days=1)
     return windows
 
-# ---------- limitador de tasa ----------
+# ---------- rate limiter ----------
 class RateLimiter:
     def __init__(self, min_interval_ms: int):
         self.min_interval = max(0.0, min_interval_ms / 1000.0)
         self._last = 0.0
         self._lock = asyncio.Lock()
-
     async def wait(self):
         async with self._lock:
             now = time.monotonic()
@@ -82,7 +77,11 @@ class RateLimiter:
                 await asyncio.sleep(self.min_interval - delta)
             self._last = time.monotonic()
 
-# ---------- helpers de guardado ----------
+# ---------- almacenamiento (.json.gz) ----------
+def _write_json_gz(path: Path, obj: Dict[str, Any]):
+    with gzip.open(path, "wt", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False)
+
 def save_pages(out_dir: Path, scope: str, pages: List[Dict[str, Any]]) -> Tuple[int,int]:
     out_dir.mkdir(parents=True, exist_ok=True)
     total_items, total_pages = 0, 0
@@ -90,12 +89,11 @@ def save_pages(out_dir: Path, scope: str, pages: List[Dict[str, Any]]) -> Tuple[
         items = len(obj.get("response", [])) if isinstance(obj, dict) else 0
         total_items += items
         total_pages += 1
-        (out_dir / f"{scope}_p{i}.json").write_text(json.dumps(obj, ensure_ascii=False))
+        _write_json_gz(out_dir / f"{scope}_p{i}.json.gz", obj)
     return total_items, total_pages
 
 def scope_exists(out_dir: Path, scope: str) -> bool:
-    # existe si hay al menos un archivo que matchee
-    return any(out_dir.glob(f"{scope}_p*.json"))
+    return any(out_dir.glob(f"{scope}_p*.json.gz"))
 
 # ---------- core HTTP ----------
 async def api_get(client: httpx.AsyncClient, base: str, path: str,
@@ -115,18 +113,15 @@ async def api_get(client: httpx.AsyncClient, base: str, path: str,
                 return {"errors": str(e), "response": []}
             await asyncio.sleep(0.75 * (2 ** attempt))
 
-# ---------- descarga por ventana (from/to) ----------
-async def fetch_window(client: httpx.AsyncClient, sport: str, base: str, path: str,
+# ---------- window (soccer) ----------
+async def fetch_window(client: httpx.AsyncClient, base: str, path: str,
                        start_iso: str, end_iso: str, limiter: RateLimiter) -> List[Dict[str, Any]]:
-    pages = []
-    cur = 1
-    total = None
+    pages, cur = [], 1
     while True:
         obj = await api_get(client, base, path,
                             {"from": start_iso, "to": end_iso, "page": cur},
                             limiter)
         pages.append(obj)
-        # paginación APISports
         try:
             paging = obj.get("paging") or {}
             total = int(paging.get("total") or 1)
@@ -138,12 +133,10 @@ async def fetch_window(client: httpx.AsyncClient, sport: str, base: str, path: s
         cur += 1
     return pages
 
-# ---------- descarga por día (sin from/to) ----------
+# ---------- day (mlb/nfl/nba/nhl) ----------
 async def fetch_day(client: httpx.AsyncClient, base: str, path: str,
                     day_iso: str, limiter: RateLimiter) -> List[Dict[str, Any]]:
-    pages = []
-    cur = 1
-    total = None
+    pages, cur = [], 1
     while True:
         obj = await api_get(client, base, path, {"date": day_iso, "page": cur}, limiter)
         pages.append(obj)
@@ -158,82 +151,66 @@ async def fetch_day(client: httpx.AsyncClient, base: str, path: str,
         cur += 1
     return pages
 
-# ---------- plan de tareas ----------
+# ---------- ejecución ----------
 async def run_backfill(sports: List[str], start: date, end: date,
                        window_days: int, concurrency: int, throttle_ms: int,
                        overwrite: bool):
     limiter = RateLimiter(throttle_ms)
-    connector = httpx.AsyncHTTPTransport(retries=0)
-    async with httpx.AsyncClient(transport=connector, timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=30.0) as client:
         sem = asyncio.Semaphore(concurrency)
-        tasks = []
-        index_rows = []
+        tasks, all_rows = [], []
 
-        async def _worker(scope_key: str, coro, out_dir: Path, scope: str):
+        async def _worker(sport_key: str, base: str, path: str,
+                          out_dir: Path, scope: str, coro):
             async with sem:
-                # reanudable
                 if not overwrite and scope_exists(out_dir, scope):
-                    index_rows.append({
-                        "sport": scope_key, "scope": scope,
-                        "pages": None, "items": None, "status": "cached"
-                    })
+                    all_rows.append({"sport": sport_key, "scope": scope,
+                                     "pages": None, "items": None, "status": "cached"})
                     return
                 pages = await coro
                 items, pages_n = save_pages(out_dir, scope, pages)
-                index_rows.append({
-                    "sport": scope_key, "scope": scope,
-                    "pages": pages_n, "items": items, "status": "ok"
-                })
+                all_rows.append({"sport": sport_key, "scope": scope,
+                                 "pages": pages_n, "items": items, "status": "ok"})
 
         for s in sports:
-            api_key, base, path = SPORT_MAP[s]
-            out_sport_dir = OUT_DIR / s
-            out_sport_dir.mkdir(parents=True, exist_ok=True)
+            apikey, base, path = SPORT_MAP[s]
+            out_dir = OUT_DIR / s
+            out_dir.mkdir(parents=True, exist_ok=True)
 
             if s == "soccer":
-                # modo ventana from/to -> MUCHÍSIMO más rápido
-                for a,b in month_windows(start, end, window_days):
+                for a, b in month_windows(start, end, window_days):
                     scope = f"{a.isoformat()}_{b.isoformat()}"
-                    coro = fetch_window(client, s, base, path, a.isoformat(), b.isoformat(), limiter)
-                    tasks.append(_worker(s, coro, out_sport_dir, scope))
+                    coro = fetch_window(client, base, path, a.isoformat(), b.isoformat(), limiter)
+                    tasks.append(_worker(s, base, path, out_dir, scope, coro))
             else:
-                # modo por día (sin from/to)
                 for d in iter_dates(start, end):
                     scope = f"{d.isoformat()}"
                     coro = fetch_day(client, base, path, d.isoformat(), limiter)
-                    tasks.append(_worker(s, coro, out_sport_dir, scope))
+                    tasks.append(_worker(s, base, path, out_dir, scope, coro))
 
-        # Ejecutar en paralelo respetando semáforo y rate limit
         await asyncio.gather(*tasks)
 
-        # escribir índice por deporte
-        df = pd.DataFrame(index_rows)
+        df = pd.DataFrame(all_rows)
         for s in sports:
-            sub = df[df["sport"]==s].copy()
+            sub = df[df["sport"] == s].copy()
             if not sub.empty:
                 (OUT_DIR / s / "index.csv").write_text(sub.to_csv(index=False), encoding="utf-8")
                 print(f"[{s}] {len(sub)} scopes -> {OUT_DIR / s / 'index.csv'}")
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--sport", required=True, help="soccer|mlb|nfl|nba|nhl|all o lista (ej: mlb,nfl)")
+    ap.add_argument("--sport", required=True, help="soccer|mlb|nfl|nba|nhl|all o lista (mlb,nfl)")
     ap.add_argument("--years", help="2021-2024 o 2024")
     ap.add_argument("--start", help="YYYY-MM-DD")
     ap.add_argument("--end", help="YYYY-MM-DD")
-    ap.add_argument("--window-days", type=int, default=30, help="tamaño de ventana para from/to (soccer)")
+    ap.add_argument("--window-days", type=int, default=DEFAULT_WINDOW_DAYS)
     ap.add_argument("--concurrency", type=int, default=DEFAULT_CONCURRENCY)
     ap.add_argument("--throttle-ms", type=int, default=DEFAULT_THROTTLE_MS)
     ap.add_argument("--overwrite", action="store_true")
     args = ap.parse_args()
 
     sports_raw = [s.strip().lower() for s in args.sport.split(",")]
-    if "all" in sports_raw:
-        sports = list(SPORT_MAP.keys())
-    else:
-        sports = [s for s in sports_raw if s in SPORT_MAP]
-        unknown = [s for s in sports_raw if s not in SPORT_MAP]
-        if unknown:
-            print(f"[warn] deportes desconocidos ignorados: {unknown}")
+    sports = list(SPORT_MAP.keys()) if "all" in sports_raw else [s for s in sports_raw if s in SPORT_MAP]
 
     if args.start and args.end:
         start = datetime.strptime(args.start, "%Y-%m-%d").date()
@@ -244,8 +221,8 @@ def main():
     else:
         raise SystemExit("Debes indicar --years o --start/--end")
 
-    print(f"[backfill] deportes={sports} rango={start}..{end} "
-          f"window={args.window_days}d concurrency={args.concurrency} throttle={args.throttle_ms}ms")
+    print(f"[backfill] sports={sports} range={start}..{end} "
+          f"win={args.window_days}d conc={args.concurrency} throttle={args.throttle_ms}ms")
 
     asyncio.run(run_backfill(
         sports=sports,
@@ -259,4 +236,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
