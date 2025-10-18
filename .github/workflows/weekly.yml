@@ -64,13 +64,29 @@ jobs:
     # años a cubrir
     Y_START=2021
     Y_END=2024
-    # mes por semana ISO (1..12)
+    # mes según la semana ISO (1..12)
     WEEK=$(date -u +%V)
     M=$(( (10#$WEEK % 12) + 1 ))
-    # parámetros de velocidad
+    # parámetros de velocidad (ajústalos si ves 429)
     CONC=10
-    THROTTLE=220     # ms ~ 4.5 rps aprox (ajusta si hace falta)
-    WIN=30           # días por ventana para soccer
+    THROTTLE=220   # ms (~4.5 req/seg global)
+    WIN=30         # días por ventana (soccer with from/to)
+
+    echo "Semana $WEEK -> mes $M | CONC=$CONC THROTTLE=$THROTTLE WIN=$WIN"
+    for Y in $(seq $Y_START $Y_END); do
+      START=$(date -u -d "$Y-$M-01" +%F)
+      END=$(date -u -d "$START +1 month -1 day" +%F)
+      echo "Backfill $Y-$M ($START..$END)"
+      # Futbol (from/to): 1–2 requests por mes + paginación
+      python pipelines/backfill.py --sport soccer \
+        --start "$START" --end "$END" \
+        --window-days "$WIN" --concurrency "$CONC" --throttle-ms "$THROTTLE" || true
+      # MLB/NFL/NBA/NHL por día en paralelo
+      python pipelines/backfill.py --sport mlb,nfl,nba,nhl \
+        --start "$START" --end "$END" \
+        --concurrency "$CONC" --throttle-ms "$THROTTLE" || true
+    done
+
 
     echo "Semana $WEEK -> mes $M | CONC=$CONC THROTTLE=$THROTTLE WIN=$WIN"
     for Y in $(seq $Y_START $Y_END); do
