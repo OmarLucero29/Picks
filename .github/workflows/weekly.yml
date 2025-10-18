@@ -9,12 +9,13 @@ concurrency:
   group: weekly-${{ github.ref }}
   cancel-in-progress: true
 
+# Variables compartidas para todos los jobs
 env:
   YEARS_START: "2021"
   YEARS_END: "2024"
-  APISPORTS_THROTTLE_MS: "220"
-  APISPORTS_CONCURRENCY: "10"
-  WINDOW_DAYS: "30"
+  APISPORTS_THROTTLE_MS: "220"    # ~4.5 req/seg
+  APISPORTS_CONCURRENCY: "10"     # workers
+  WINDOW_DAYS: "30"               # tamaño de ventana para soccer
 
 jobs:
   backfill-year:
@@ -54,16 +55,16 @@ jobs:
           START=$(date -u -d "${YEAR}-${M}-01" +%F)
           END=$(date -u -d "$START +1 month -1 day" +%F)
           echo "Year=$YEAR  Month=$M  Range=$START..$END"
-          echo "CONC=${APISPORTS_CONCURRENCY}  THROTTLE=${APISPORTS_THROTTLE_MS}ms WINDOW=${WINDOW_DAYS}d"
+          echo "CONC=${APISPORTS_CONCURRENCY}  THROTTLE=${APISPORTS_THROTTLE_MS}ms  WINDOW=${WINDOW_DAYS}d"
 
-          # soccer (from/to comprimido)
+          # Soccer (from/to; comprimido .json.gz)
           python pipelines/backfill.py --sport soccer \
             --start "$START" --end "$END" \
             --window-days "${WINDOW_DAYS}" \
             --concurrency "${APISPORTS_CONCURRENCY}" \
             --throttle-ms "${APISPORTS_THROTTLE_MS}" || true
 
-          # otros deportes día a día en paralelo (comprimidos)
+          # Otros deportes (día a día; comprimido .json.gz)
           python pipelines/backfill.py --sport mlb,nfl,nba,nhl \
             --start "$START" --end "$END" \
             --concurrency "${APISPORTS_CONCURRENCY}" \
@@ -86,8 +87,8 @@ jobs:
       GSHEET_ID: ${{ secrets.GSHEET_ID }}
       GCP_SA_JSON: ${{ secrets.GCP_SA_JSON }}
       APISPORTS_KEY: ${{ secrets.APISPORTS_KEY }}
-      YEARS_START: ${{ env.YEARS_START }}
-      YEARS_END: ${{ env.YEARS_END }}
+      # YEARS_START / YEARS_END se heredan del env de workflow (arriba)
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -128,11 +129,15 @@ jobs:
             data/historical/**/index.csv
 
       - name: Notify Telegram (progreso)
-        if: ${{ env.TELEGRAM_BOT_TOKEN != '' && env.TELEGRAM_CHAT_ID != '' }}
         run: |
-          SUMMARY=$(tail -n +2 reports/historical_progress.csv | awk -F, '{printf "• %s: %.1f%% (%s/%s)\n", $1, $4, $2, $3}')
-          MSG="📊 Progreso históricos (objetivo ${YEARS_START}-${YEARS_END})%0A${SUMMARY}"
-          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-            -d chat_id="${TELEGRAM_CHAT_ID}" \
-            -d parse_mode="HTML" \
-            --data-urlencode "text=${MSG}" >/dev/null 2>&1 || true
+          set -e
+          if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
+            SUMMARY=$(tail -n +2 reports/historical_progress.csv | awk -F, '{printf "• %s: %.1f%% (%s/%s)\\n", $1, $4, $2, $3}')
+            MSG="📊 Progreso históricos (objetivo ${YEARS_START}-${YEARS_END})%0A${SUMMARY}"
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -d chat_id="${TELEGRAM_CHAT_ID}" \
+              -d parse_mode="HTML" \
+              --data-urlencode "text=${MSG}" >/dev/null 2>&1 || true
+          else
+            echo "Telegram no configurado; omitiendo notificación."
+          fi
