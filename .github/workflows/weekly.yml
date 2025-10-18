@@ -2,22 +2,31 @@ name: weekly
 
 on:
   schedule:
-    - cron: "0 7 * * 2"   # Martes 07:00 UTC
+    - cron: "0 9 * * 2"   # Martes 09:00 UTC
   workflow_dispatch: {}
 
-jobs:
-  run-weekly:
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
+concurrency:
+  group: weekly-${{ github.ref }}
+  cancel-in-progress: true
 
+env:
+  YEARS_START: "2021"
+  YEARS_END: "2024"
+  APISPORTS_THROTTLE_MS: "220"
+  APISPORTS_CONCURRENCY: "10"
+  WINDOW_DAYS: "30"
+
+jobs:
+  backfill-year:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        year: [2021, 2022, 2023, 2024]
+    timeout-minutes: 45
     env:
       APISPORTS_KEY: ${{ secrets.APISPORTS_KEY }}
-      HF_TOKEN: ${{ secrets.HF_TOKEN }}
-      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-      GSHEET_ID: ${{ secrets.GSHEET_ID }}
-      GCP_SA_JSON: ${{ secrets.GCP_SA_JSON }}
-
+      YEAR: ${{ matrix.year }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -29,46 +38,69 @@ jobs:
 
       - name: Install deps
         run: |
-          python -m pip install -U pip
+          python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Preflight secrets
+      - name: Preflight APISports
         run: |
-          [ -n "$APISPORTS_KEY" ] || { echo "::error::APISPORTS_KEY faltante"; exit 1; }
-          echo "APISPORTS_KEY: OK"
-          [ -n "$GSHEET_ID" ] && echo "GSHEET_ID: OK" || echo "::warning::GSHEET_ID faltante"
-          [ -n "$GCP_SA_JSON" ] && echo "GCP_SA_JSON: OK" || echo "::warning::GCP_SA_JSON faltante"
-          [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ] && echo "Telegram: OK" || echo "Telegram: no configurado"
+          [ -n "$APISPORTS_KEY" ] && echo "APISPORTS_KEY: OK" || (echo "::error::APISPORTS_KEY faltante" && exit 1)
 
-      - name: Backfill progresivo rápido (ventanas mensuales y concurrencia)
+      - name: Backfill año ${{ matrix.year }} (mes según semana ISO)
         shell: bash
         run: |
           set -e
-          Y_START=2021
-          Y_END=2024
           WEEK=$(date -u +%V)
           M=$(( (10#$WEEK % 12) + 1 ))
-          CONC=10
-          THROTTLE=220
-          WIN=30
-          echo "Semana ISO $WEEK -> mes $M | CONC=$CONC THROTTLE=$THROTTLE WIN=$WIN"
-          for Y in $(seq $Y_START $Y_END); do
-            START=$(date -u -d "$Y-$M-01" +%F)
-            END=$(date -u -d "$START +1 month -1 day" +%F)
-            echo "Backfill $Y-$M ($START..$END)"
-            # Fútbol con from/to (mucho más rápido)
-            python pipelines/backfill.py --sport soccer \
-              --start "$START" --end "$END" \
-              --window-days "$WIN" --concurrency "$CONC" --throttle-ms "$THROTTLE" || true
-            # Resto por día con concurrencia
-            python pipelines/backfill.py --sport mlb,nfl,nba,nhl \
-              --start "$START" --end "$END" \
-              --concurrency "$CONC" --throttle-ms "$THROTTLE" || true
-          done
+          START=$(date -u -d "${YEAR}-${M}-01" +%F)
+          END=$(date -u -d "$START +1 month -1 day" +%F)
+          echo "Year=$YEAR  Month=$M  Range=$START..$END"
+          echo "CONC=${APISPORTS_CONCURRENCY}  THROTTLE=${APISPORTS_THROTTLE_MS}ms WINDOW=${WINDOW_DAYS}d"
 
-      - name: Reporte de avance de históricos
+          # soccer (from/to comprimido)
+          python pipelines/backfill.py --sport soccer \
+            --start "$START" --end "$END" \
+            --window-days "${WINDOW_DAYS}" \
+            --concurrency "${APISPORTS_CONCURRENCY}" \
+            --throttle-ms "${APISPORTS_THROTTLE_MS}" || true
+
+          # otros deportes día a día en paralelo (comprimidos)
+          python pipelines/backfill.py --sport mlb,nfl,nba,nhl \
+            --start "$START" --end "$END" \
+            --concurrency "${APISPORTS_CONCURRENCY}" \
+            --throttle-ms "${APISPORTS_THROTTLE_MS}" || true
+
+      - name: Upload partial indexes
+        uses: actions/upload-artifact@v4
+        with:
+          name: historical-index-${{ matrix.year }}
+          path: data/historical/**/index.csv
+
+  post-weekly:
+    runs-on: ubuntu-latest
+    needs: backfill-year
+    timeout-minutes: 45
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      GSHEET_ID: ${{ secrets.GSHEET_ID }}
+      GCP_SA_JSON: ${{ secrets.GCP_SA_JSON }}
+      APISPORTS_KEY: ${{ secrets.APISPORTS_KEY }}
+      YEARS_START: ${{ env.YEARS_START }}
+      YEARS_END: ${{ env.YEARS_END }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
         run: |
-          python pipelines/progress_backfill.py --years 2021-2024
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
       - name: Rebuild features + recalibración
         run: |
@@ -78,21 +110,29 @@ jobs:
       - name: Predict + servir
         run: |
           python models/predict.py
-          python serving/select_picks.py
-          python serving/parlay_builder.py
-          python serving/sheets_append.py
+          python serving/select_picks.py || true
+          python serving/parlay_builder.py || true
 
-      - name: Notify Telegram
-        if: ${{ env.TELEGRAM_BOT_TOKEN != '' && env.TELEGRAM_CHAT_ID != '' }}
+      - name: Progreso de históricos (porcentaje por deporte)
         run: |
-          MSG="✅ Weekly OK. Avance históricos en reports/backfill_progress.csv"
-          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-            -d chat_id="${TELEGRAM_CHAT_ID}" -d text="$MSG" >/dev/null || true
+          python pipelines/progress.py --years-start "$YEARS_START" --years-end "$YEARS_END"
+          echo "Resumen progreso:"
+          cat reports/historical_progress.csv || true
 
-      - name: Upload artifacts
+      - name: Upload artifacts (final)
         uses: actions/upload-artifact@v4
         with:
-          name: weekly_reports
+          name: weekly-outputs
           path: |
             reports/
-            data/historical/*/index.csv
+            data/historical/**/index.csv
+
+      - name: Notify Telegram (progreso)
+        if: ${{ env.TELEGRAM_BOT_TOKEN != '' && env.TELEGRAM_CHAT_ID != '' }}
+        run: |
+          SUMMARY=$(tail -n +2 reports/historical_progress.csv | awk -F, '{printf "• %s: %.1f%% (%s/%s)\n", $1, $4, $2, $3}')
+          MSG="📊 Progreso históricos (objetivo ${YEARS_START}-${YEARS_END})%0A${SUMMARY}"
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            -d parse_mode="HTML" \
+            --data-urlencode "text=${MSG}" >/dev/null 2>&1 || true
