@@ -13,6 +13,7 @@ jobs:
   run-daily:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+
     env:
       PYTHONPATH: ${{ github.workspace }}
       APISPORTS_KEY: ${{ secrets.APISPORTS_KEY }}
@@ -23,6 +24,7 @@ jobs:
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
+      # Parámetros
       MAX_PICKS: '5'
       PARLAY_LEGS: '3'
       PARLAY_LEGS_DREAM: '5'
@@ -32,6 +34,7 @@ jobs:
       STAKE_SEGURITO: '5%'
       STAKE_SONADORA: '2%'
 
+      # Tabs de Google Sheets
       GSHEET_PICKS_TAB: 'PICKS'
       GSHEET_PARLAY_TAB: 'PARLAYS'
       GSHEET_SAVED_TAB: 'PICKS_GUARDADOS'
@@ -50,6 +53,7 @@ jobs:
           pip install -r requirements.txt
 
       - name: Preflight secrets
+        shell: bash
         run: |
           [ -n "$APISPORTS_KEY" ] && echo "APISPORTS_KEY: OK" || { echo "::error::APISPORTS_KEY faltante"; exit 1; }
           [ -n "$GCP_SA_JSON" ] && echo "GCP_SA_JSON: OK" || echo "::warning::GCP_SA_JSON faltante"
@@ -57,17 +61,12 @@ jobs:
           [ -n "$HF_TOKEN" ] && echo "HF_TOKEN: OK" || echo "::warning::HF_TOKEN faltante"
           if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then echo "Telegram: OK"; else echo "Telegram: off"; fi
 
+      # Debug simple sin here-doc para evitar problemas de YAML
       - name: Debug paths
         shell: bash
         run: |
-          echo "Workspace = $GITHUB_WORKSPACE"
-          python - <<'PY'
-import os, sys, pathlib
-print("cwd:", os.getcwd())
-print("sys.path[:3]:", sys.path[:3])
-print("integrations exists ->", pathlib.Path("integrations").exists())
-print("pipelines exists ->", pathlib.Path("pipelines").exists())
-PY
+          echo "Workspace=$GITHUB_WORKSPACE"
+          python -c "import os,sys,pathlib; print('cwd=',os.getcwd()); print('sys.path0=',sys.path[0]); print('has integrations?',pathlib.Path('integrations').exists()); print('has pipelines?',pathlib.Path('pipelines').exists())"
 
       - name: Fetch upcoming (48-72h) + results D-1
         run: python pipelines/fetch_all.py --mode daily
