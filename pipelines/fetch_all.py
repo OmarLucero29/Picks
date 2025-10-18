@@ -1,19 +1,18 @@
 # pipelines/fetch_all.py
-import os, sys
+import os, sys, json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import argparse
 import pandas as pd
 
-# --- Robust import of integrations.apisports_client (with fallback) ---
+# --- Import robusto del cliente APISports ---
 try:
-    # Asegura que la raíz del repo esté en sys.path
     ROOT = Path(__file__).resolve().parents[1]
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
     from integrations.apisports_client import get as api_get  # type: ignore
 except Exception:
-    # Fallback inline por si no existe el paquete 'integrations'
+    # Fallback inline si no existe el paquete 'integrations'
     import requests
     APISPORTS_KEY = os.getenv("APISPORTS_KEY", "")
     BASES = {
@@ -30,12 +29,7 @@ except Exception:
             raise ValueError(f"Sport no soportado: {sport}")
         url = f"{BASES[sport]}{path}"
         s = session or requests.Session()
-        r = s.get(
-            url,
-            headers={"x-apisports-key": APISPORTS_KEY},
-            params=params or {},
-            timeout=timeout,
-        )
+        r = s.get(url, headers={"x-apisports-key": APISPORTS_KEY}, params=params or {}, timeout=timeout)
         r.raise_for_status()
         return r.json()
 
@@ -60,11 +54,12 @@ def fetch_apisports_block(sport_key: str, path: str, date_str: str):
         return {"errors": str(e), "response": []}
 
 def save_json(obj, fname: str):
-    (OUT / fname).write_text(pd.io.json.dumps(obj, indent=2, ensure_ascii=False))
+    # ✅ usar json.dumps (no pandas.io.json)
+    (OUT / fname).write_text(json.dumps(obj, indent=2, ensure_ascii=False))
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", default="daily", choices=["daily", "weekly"])
+    parser.add_argument("--mode", default="daily", choices=["daily","weekly"])
     args = parser.parse_args()
 
     d0, d1 = date_range(args.mode)
@@ -77,13 +72,17 @@ def main():
         ("baseball", "/games"),
         ("american_football", "/games"),
     ]
+    total = 0
     for d in days:
         ds = d.date().isoformat()
         for sport_key, path in mapping:
             obj = fetch_apisports_block(sport_key, path, ds)
             save_json(obj, f"apisports_{sport_key}_{ds}.json")
+            n = len(obj.get("response", [])) if isinstance(obj, dict) else 0
+            print(f"saved apisports_{sport_key}_{ds}.json  items={n}")
+            total += n
 
-    print("fetch_all: OK")
+    print(f"fetch_all: OK  total_items={total}")
 
 if __name__ == "__main__":
     main()
