@@ -1,5 +1,4 @@
-import os
-import requests
+import os, requests
 
 APISPORTS_KEY = os.getenv("APISPORTS_KEY", "")
 
@@ -12,11 +11,6 @@ BASES = {
 }
 
 def get(session=None, sport="football", path="/status", params=None, timeout=30):
-    """
-    Wrapper unificado para APISports.
-    sport: football | basketball | hockey | baseball | american_football
-    path:  "/fixtures" | "/games" | "/status" ...
-    """
     if not APISPORTS_KEY:
         raise RuntimeError("APISPORTS_KEY faltante")
     base = BASES.get(sport)
@@ -27,3 +21,4 @@ def get(session=None, sport="football", path="/status", params=None, timeout=30)
     r = s.get(url, headers={"x-apisports-key": APISPORTS_KEY}, params=params or {}, timeout=timeout)
     r.raise_for_status()
     return r.json()
+
