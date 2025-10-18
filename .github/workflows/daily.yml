@@ -58,16 +58,18 @@ jobs:
           [ -n "$HF_TOKEN" ] && echo "HF_TOKEN: OK" || echo "::warning::HF_TOKEN faltante"
           echo "Telegram: $([ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ] && echo OK || echo off)"
 
-      - name: Debug paths
-        run: |
-          echo "Workspace = $GITHUB_WORKSPACE"
-          python - <<'PY'
+     - name: Debug paths
+  shell: bash
+  run: |
+    echo "Workspace = $GITHUB_WORKSPACE"
+    python - <<'PY'
 import os, sys, pathlib
 print("cwd:", os.getcwd())
 print("sys.path[:3]:", sys.path[:3])
 print("integrations exists ->", pathlib.Path("integrations").exists())
 print("pipelines exists ->", pathlib.Path("pipelines").exists())
 PY
+
 
       - name: Fetch upcoming (48-72h) + results D-1
         run: python pipelines/fetch_all.py --mode daily
