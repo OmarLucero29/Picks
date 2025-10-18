@@ -2,108 +2,75 @@ name: weekly
 
 on:
   schedule:
-    - cron: '0 07 * * 2'   # Martes 07:00 UTC
-  workflow_dispatch:
-
-concurrency:
-  group: weekly-${{ github.ref }}
-  cancel-in-progress: true
+    - cron: "0 7 * * 2"   # Martes 07:00 UTC
+  workflow_dispatch: {}
 
 jobs:
   run-weekly:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 45
 
     env:
-      PYTHONPATH: ${{ github.workspace }}
       APISPORTS_KEY: ${{ secrets.APISPORTS_KEY }}
-      GCP_SA_JSON: ${{ secrets.GCP_SA_JSON }}
-      GSHEET_ID: ${{ secrets.GSHEET_ID }}
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
-      HF_SPACE: ${{ secrets.HF_SPACE }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-
-      MAX_PICKS: '5'
-      PARLAY_LEGS: '3'
-      PARLAY_LEGS_DREAM: '5'
-      TARGET_DEC_ODDS: '2.5'
-      TARGET_DEC_ODDS_DREAM: '10.0'
-      STAKE_DEFAULT: '5%'
-      STAKE_SEGURITO: '5%'
-      STAKE_SONADORA: '2%'
-
-      GSHEET_PICKS_TAB: 'PICKS'
-      GSHEET_PARLAY_TAB: 'PARLAYS'
-      GSHEET_SAVED_TAB: 'PICKS_GUARDADOS'
+      GSHEET_ID: ${{ secrets.GSHEET_ID }}
+      GCP_SA_JSON: ${{ secrets.GCP_SA_JSON }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
       - name: Install deps
         run: |
-          pip install --upgrade pip
+          python -m pip install -U pip
           pip install -r requirements.txt
 
-      # Debug simple sin here-doc para evitar problemas de YAML
-      - name: Debug paths
+      - name: Preflight secrets
+        run: |
+          [ -n "$APISPORTS_KEY" ] || { echo "::error::APISPORTS_KEY faltante"; exit 1; }
+          echo "APISPORTS_KEY: OK"
+          [ -n "$GSHEET_ID" ] && echo "GSHEET_ID: OK" || echo "::warning::GSHEET_ID faltante"
+          [ -n "$GCP_SA_JSON" ] && echo "GCP_SA_JSON: OK" || echo "::warning::GCP_SA_JSON faltante"
+          [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ] && echo "Telegram: OK" || echo "Telegram: no configurado"
+
+      - name: Backfill progresivo rápido (ventanas mensuales y concurrencia)
         shell: bash
         run: |
-          echo "Workspace=$GITHUB_WORKSPACE"
-          python -c "import os,sys,pathlib; print('cwd=',os.getcwd()); print('sys.path0=',sys.path[0]); print('has integrations?',pathlib.Path('integrations').exists()); print('has pipelines?',pathlib.Path('pipelines').exists())"
+          set -e
+          Y_START=2021
+          Y_END=2024
+          WEEK=$(date -u +%V)
+          M=$(( (10#$WEEK % 12) + 1 ))
+          CONC=10
+          THROTTLE=220
+          WIN=30
+          echo "Semana ISO $WEEK -> mes $M | CONC=$CONC THROTTLE=$THROTTLE WIN=$WIN"
+          for Y in $(seq $Y_START $Y_END); do
+            START=$(date -u -d "$Y-$M-01" +%F)
+            END=$(date -u -d "$START +1 month -1 day" +%F)
+            echo "Backfill $Y-$M ($START..$END)"
+            # Fútbol con from/to (mucho más rápido)
+            python pipelines/backfill.py --sport soccer \
+              --start "$START" --end "$END" \
+              --window-days "$WIN" --concurrency "$CONC" --throttle-ms "$THROTTLE" || true
+            # Resto por día con concurrencia
+            python pipelines/backfill.py --sport mlb,nfl,nba,nhl \
+              --start "$START" --end "$END" \
+              --concurrency "$CONC" --throttle-ms "$THROTTLE" || true
+          done
 
-- name: Backfill progresivo rápido (ventanas mensuales y concurrencia)
-  shell: bash
-  run: |
-    set -e
-    # años a cubrir
-    Y_START=2021
-    Y_END=2024
-    # mes según la semana ISO (1..12)
-    WEEK=$(date -u +%V)
-    M=$(( (10#$WEEK % 12) + 1 ))
-    # parámetros de velocidad (ajústalos si ves 429)
-    CONC=10
-    THROTTLE=220   # ms (~4.5 req/seg global)
-    WIN=30         # días por ventana (soccer with from/to)
+      - name: Reporte de avance de históricos
+        run: |
+          python pipelines/progress_backfill.py --years 2021-2024
 
-    echo "Semana $WEEK -> mes $M | CONC=$CONC THROTTLE=$THROTTLE WIN=$WIN"
-    for Y in $(seq $Y_START $Y_END); do
-      START=$(date -u -d "$Y-$M-01" +%F)
-      END=$(date -u -d "$START +1 month -1 day" +%F)
-      echo "Backfill $Y-$M ($START..$END)"
-      # Futbol (from/to): 1–2 requests por mes + paginación
-      python pipelines/backfill.py --sport soccer \
-        --start "$START" --end "$END" \
-        --window-days "$WIN" --concurrency "$CONC" --throttle-ms "$THROTTLE" || true
-      # MLB/NFL/NBA/NHL por día en paralelo
-      python pipelines/backfill.py --sport mlb,nfl,nba,nhl \
-        --start "$START" --end "$END" \
-        --concurrency "$CONC" --throttle-ms "$THROTTLE" || true
-    done
-
-
-    echo "Semana $WEEK -> mes $M | CONC=$CONC THROTTLE=$THROTTLE WIN=$WIN"
-    for Y in $(seq $Y_START $Y_END); do
-      START=$(date -u -d "$Y-$M-01" +%F)
-      END=$(date -u -d "$START +1 month -1 day" +%F)
-      echo "Backfill $Y-$M ($START..$END)"
-      # Fútbol con ventanas from/to
-      python pipelines/backfill.py --sport soccer \
-        --start "$START" --end "$END" \
-        --window-days "$WIN" --concurrency "$CONC" --throttle-ms "$THROTTLE" || true
-      # Resto por día en paralelo
-      python pipelines/backfill.py --sport mlb,nfl,nba,nhl \
-        --start "$START" --end "$END" \
-        --concurrency "$CONC" --throttle-ms "$THROTTLE" || true
-    done
-
-      - name: Rebuild features Oro + recalibración
+      - name: Rebuild features + recalibración
         run: |
           python pipelines/features.py
           python pipelines/recalibrate.py
@@ -115,15 +82,17 @@ jobs:
           python serving/parlay_builder.py
           python serving/sheets_append.py
 
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: weekly_outputs
-          path: reports/
-
       - name: Notify Telegram
         if: ${{ env.TELEGRAM_BOT_TOKEN != '' && env.TELEGRAM_CHAT_ID != '' }}
         run: |
-          TXT="📊 Recalibración semanal completa. Nuevos picks listos."
+          MSG="✅ Weekly OK. Avance históricos en reports/backfill_progress.csv"
           curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-            -d chat_id="${TELEGRAM_CHAT_ID}" -d text="$TXT" >/dev/null || true
+            -d chat_id="${TELEGRAM_CHAT_ID}" -d text="$MSG" >/dev/null || true
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: weekly_reports
+          path: |
+            reports/
+            data/historical/*/index.csv
