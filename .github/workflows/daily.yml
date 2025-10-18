@@ -38,6 +38,7 @@ jobs:
       GSHEET_PARLAY_TAB: "PARLAYS"
       GSHEET_SAVED_TAB: "PICKS_GUARDADOS"
 
+      PYTHONPATH: ${{ github.workspace }}
     steps:
       - uses: actions/checkout@v4
 
@@ -58,6 +59,16 @@ jobs:
           [ -n "$GSHEET_ID" ] && echo "GSHEET_ID: OK" || echo "::warning::GSHEET_ID faltante"
           [ -n "$HF_TOKEN" ] && echo "HF_TOKEN: OK" || echo "::warning::HF_TOKEN faltante"
           echo "Telegram: $([ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ] && echo OK || echo off)"
+      - name: Debug tree & pythonpath
+  run: |
+    echo "workspace = $GITHUB_WORKSPACE"
+    python - <<'PY'
+import os, sys, pathlib
+print("cwd:", os.getcwd())
+print("sys.path[0:3]:", sys.path[0:3])
+print("exists integrations? ->", pathlib.Path("integrations").exists())
+print("exists pipelines? ->", pathlib.Path("pipelines").exists())
+PY
 
       - name: Fetch upcoming (48-72h) + results D-1
         run: python pipelines/fetch_all.py --mode daily
