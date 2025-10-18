@@ -13,8 +13,9 @@ jobs:
   run-daily:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+
     env:
-      # === Secrets / Vars ===
+      PYTHONPATH: ${{ github.workspace }}
       APISPORTS_KEY: ${{ secrets.APISPORTS_KEY }}
       GCP_SA_JSON: ${{ secrets.GCP_SA_JSON }}
       GSHEET_ID: ${{ secrets.GSHEET_ID }}
@@ -23,7 +24,6 @@ jobs:
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
-      # === Parámetros ===
       MAX_PICKS: "5"
       PARLAY_LEGS: "3"
       PARLAY_LEGS_DREAM: "5"
@@ -33,12 +33,10 @@ jobs:
       STAKE_SEGURITO: "5%"
       STAKE_SONADORA: "2%"
 
-      # Tabs de Google Sheets
       GSHEET_PICKS_TAB: "PICKS"
       GSHEET_PARLAY_TAB: "PARLAYS"
       GSHEET_SAVED_TAB: "PICKS_GUARDADOS"
 
-      PYTHONPATH: ${{ github.workspace }}
     steps:
       - uses: actions/checkout@v4
 
@@ -59,15 +57,16 @@ jobs:
           [ -n "$GSHEET_ID" ] && echo "GSHEET_ID: OK" || echo "::warning::GSHEET_ID faltante"
           [ -n "$HF_TOKEN" ] && echo "HF_TOKEN: OK" || echo "::warning::HF_TOKEN faltante"
           echo "Telegram: $([ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ] && echo OK || echo off)"
-      - name: Debug tree & pythonpath
-  run: |
-    echo "workspace = $GITHUB_WORKSPACE"
-    python - <<'PY'
+
+      - name: Debug paths
+        run: |
+          echo "Workspace = $GITHUB_WORKSPACE"
+          python - <<'PY'
 import os, sys, pathlib
 print("cwd:", os.getcwd())
-print("sys.path[0:3]:", sys.path[0:3])
-print("exists integrations? ->", pathlib.Path("integrations").exists())
-print("exists pipelines? ->", pathlib.Path("pipelines").exists())
+print("sys.path[:3]:", sys.path[:3])
+print("integrations exists ->", pathlib.Path("integrations").exists())
+print("pipelines exists ->", pathlib.Path("pipelines").exists())
 PY
 
       - name: Fetch upcoming (48-72h) + results D-1
