@@ -2,8 +2,8 @@ name: weekly
 
 on:
   schedule:
-    - cron: "0 07 * * 2"   # Martes 07:00 UTC (ajustable)
-  workflow_dispatch: {}
+    - cron: '0 07 * * 2'   # Martes 07:00 UTC
+  workflow_dispatch:
 
 concurrency:
   group: weekly-${{ github.ref }}
@@ -13,7 +13,6 @@ jobs:
   run-weekly:
     runs-on: ubuntu-latest
     timeout-minutes: 120
-
     env:
       PYTHONPATH: ${{ github.workspace }}
       APISPORTS_KEY: ${{ secrets.APISPORTS_KEY }}
@@ -24,18 +23,18 @@ jobs:
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
-      MAX_PICKS: "5"
-      PARLAY_LEGS: "3"
-      PARLAY_LEGS_DREAM: "5"
-      TARGET_DEC_ODDS: "2.5"
-      TARGET_DEC_ODDS_DREAM: "10.0"
-      STAKE_DEFAULT: "5%"
-      STAKE_SEGURITO: "5%"
-      STAKE_SONADORA: "2%"
+      MAX_PICKS: '5'
+      PARLAY_LEGS: '3'
+      PARLAY_LEGS_DREAM: '5'
+      TARGET_DEC_ODDS: '2.5'
+      TARGET_DEC_ODDS_DREAM: '10.0'
+      STAKE_DEFAULT: '5%'
+      STAKE_SEGURITO: '5%'
+      STAKE_SONADORA: '2%'
 
-      GSHEET_PICKS_TAB: "PICKS"
-      GSHEET_PARLAY_TAB: "PARLAYS"
-      GSHEET_SAVED_TAB: "PICKS_GUARDADOS"
+      GSHEET_PICKS_TAB: 'PICKS'
+      GSHEET_PARLAY_TAB: 'PARLAYS'
+      GSHEET_SAVED_TAB: 'PICKS_GUARDADOS'
 
     steps:
       - uses: actions/checkout@v4
@@ -43,7 +42,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
       - name: Install deps
         run: |
@@ -51,6 +50,7 @@ jobs:
           pip install -r requirements.txt
 
       - name: Debug paths
+        shell: bash
         run: |
           echo "Workspace = $GITHUB_WORKSPACE"
           python - <<'PY'
