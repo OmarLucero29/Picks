@@ -2,7 +2,7 @@ name: weekly
 
 on:
   schedule:
-    - cron: "0 07 * * 2"   # Martes 07:00 UTC (ajusta según deporte)
+    - cron: "0 07 * * 2"   # Martes 07:00 UTC (ajustable)
   workflow_dispatch: {}
 
 concurrency:
@@ -13,7 +13,9 @@ jobs:
   run-weekly:
     runs-on: ubuntu-latest
     timeout-minutes: 120
+
     env:
+      PYTHONPATH: ${{ github.workspace }}
       APISPORTS_KEY: ${{ secrets.APISPORTS_KEY }}
       GCP_SA_JSON: ${{ secrets.GCP_SA_JSON }}
       GSHEET_ID: ${{ secrets.GSHEET_ID }}
@@ -48,12 +50,22 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Backfill (lotes) + cerrar semana
+      - name: Debug paths
+        run: |
+          echo "Workspace = $GITHUB_WORKSPACE"
+          python - <<'PY'
+import os, sys, pathlib
+print("cwd:", os.getcwd())
+print("sys.path[:3]:", sys.path[:3])
+print("integrations exists ->", pathlib.Path("integrations").exists())
+print("pipelines exists ->", pathlib.Path("pipelines").exists())
+PY
+
+      - name: Backfill históricos
         run: |
           python pipelines/backfill.py --sport mlb --years 2021-2024 || true
           python pipelines/backfill.py --sport tenis --years 2021-2024 || true
           python pipelines/backfill.py --sport nfl --years 2021-2024 || true
-          # añade más deportes según prioridad
 
       - name: Rebuild features Oro + recalibración
         run: |
