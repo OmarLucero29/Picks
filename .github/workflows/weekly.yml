@@ -13,6 +13,7 @@ jobs:
   run-weekly:
     runs-on: ubuntu-latest
     timeout-minutes: 120
+
     env:
       PYTHONPATH: ${{ github.workspace }}
       APISPORTS_KEY: ${{ secrets.APISPORTS_KEY }}
@@ -49,17 +50,12 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements.txt
 
+      # Debug simple sin here-doc para evitar problemas de YAML
       - name: Debug paths
         shell: bash
         run: |
-          echo "Workspace = $GITHUB_WORKSPACE"
-          python - <<'PY'
-import os, sys, pathlib
-print("cwd:", os.getcwd())
-print("sys.path[:3]:", sys.path[:3])
-print("integrations exists ->", pathlib.Path("integrations").exists())
-print("pipelines exists ->", pathlib.Path("pipelines").exists())
-PY
+          echo "Workspace=$GITHUB_WORKSPACE"
+          python -c "import os,sys,pathlib; print('cwd=',os.getcwd()); print('sys.path0=',sys.path[0]); print('has integrations?',pathlib.Path('integrations').exists()); print('has pipelines?',pathlib.Path('pipelines').exists())"
 
       - name: Backfill históricos
         run: |
