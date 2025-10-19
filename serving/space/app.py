@@ -1,57 +1,97 @@
-# app.py (lee de Google Sheets en lugar de CSV locales)
-import os, json, base64
-import gradio as gr
-import pandas as pd
-import gspread
-from google.oauth2.service_account import Credentials
-from gspread_dataframe import get_as_dataframe
+# app.py — FastAPI + Telegram Webhook para Hugging Face Spaces (gratis)
 
-SHEET_ID = os.getenv("GSHEET_ID", "")
-TAB_PICKS = os.getenv("GSHEET_PICKS_TAB", "Picks")
-TAB_PARLAY = os.getenv("GSHEET_PARLAY_TAB", "Parlay")
-SA_JSON = os.getenv("GCP_SA_JSON", "")
+import os
+import json
+import logging
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import PlainTextResponse
 
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets",
-          "https://www.googleapis.com/auth/drive"]
+# Importa tu bot completo (del canvas). ¡MUY IMPORTANTE!
+# Asegúrate que el archivo del canvas esté como bot.py en el repositorio del Space.
+from bot import (
+    bot as tg_bot,
+    dp as tg_dp,
+    BOT_COMMANDS,
+    render_config_text,
+    build_config_keyboard,
+    load_profile,
+    save_profile,
+    DEPORTES,
+)
 
-def gclient():
-    if not SA_JSON:
-        raise RuntimeError("Falta GCP_SA_JSON en secrets del Space.")
+from aiogram.types import Update
+from aiogram import Bot
+from aiogram.enums import ParseMode
+
+# === Variables requeridas ===
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+WEBHOOK_SECRET_PATH = os.getenv("WEBHOOK_SECRET_PATH", "super-secure-path")  # pon algo largo y único
+SPACE_URL = os.getenv("SPACE_URL")  # ej: https://<org>-<space>.hf.space
+
+if not TELEGRAM_BOT_TOKEN:
+    raise RuntimeError("Falta TELEGRAM_BOT_TOKEN en variables del Space.")
+
+if not SPACE_URL:
+    # Puedes setearlo en los Secrets del Space (Settings → Variables and secrets)
+    raise RuntimeError("Falta SPACE_URL (URL público del Space).")
+
+WEBHOOK_URL = f"{SPACE_URL.rstrip('/')}/webhook/{WEBHOOK_SECRET_PATH}"
+
+# Asegura parse_mode
+try:
+    tg_bot._default.parse_mode = ParseMode.HTML  # type: ignore
+except Exception:
+    pass
+
+app = FastAPI()
+
+@app.get("/")
+def root():
+    return {"ok": True, "status": "Bot Americano webhook up"}
+
+@app.get("/health")
+def health():
+    return {"status": "healthy"}
+
+@app.on_event("startup")
+async def on_startup():
+    # Fija /actualiza comandos del bot
     try:
-        data = json.loads(SA_JSON)
-    except json.JSONDecodeError:
-        data = json.loads(base64.b64decode(SA_JSON).decode("utf-8"))
-    creds = Credentials.from_service_account_info(data, scopes=SCOPES)
-    return gspread.authorize(creds)
+        await tg_bot.set_my_commands(BOT_COMMANDS)
+    except Exception as e:
+        logging.warning("No se pudieron fijar comandos: %s", e)
 
-def read_sheet(tab):
-    gc = gclient()
-    sh = gc.open_by_key(SHEET_ID)
+    # Registra el webhook en Telegram
     try:
-        ws = sh.worksheet(tab)
-    except gspread.WorksheetNotFound:
-        return pd.DataFrame()
-    df = get_as_dataframe(ws, header=0)
-    return df.dropna(how="all")
+        await tg_bot.set_webhook(WEBHOOK_URL, drop_pending_updates=True, allowed_updates=["message","callback_query"])
+        logging.info("Webhook fijado: %s", WEBHOOK_URL)
+    except Exception as e:
+        logging.error("No se pudo fijar webhook: %s", e)
+        raise
 
-def refresh(sport):
-    picks = read_sheet(TAB_PICKS)
-    parlay = read_sheet(TAB_PARLAY)
-    if isinstance(picks, pd.DataFrame) and "sport" in picks.columns and sport != "todos":
-        picks = picks[picks["sport"] == sport]
-    return picks, parlay
+@app.on_event("shutdown")
+async def on_shutdown():
+    try:
+        await tg_bot.delete_webhook(drop_pending_updates=False)
+    except Exception:
+        pass
 
-SPORTS = ["todos","futbol","baloncesto","beisbol","hockey","tenis","americano","ping_pong","esports"]
+@app.post(f"/webhook/{{secret}}")
+async def telegram_webhook(secret: str, request: Request):
+    # Verifica “ruta secreta” para evitar probes
+    if secret != WEBHOOK_SECRET_PATH:
+        raise HTTPException(status_code=403, detail="Forbidden")
 
-with gr.Blocks(title="Picks & Parlay") as demo:
-    gr.Markdown("## Picks (Top-M) y Parlay — fuente: Google Sheets")
-    with gr.Row():
-        sport_dd = gr.Dropdown(SPORTS, value="todos", label="Filtrar deporte")
-        btn = gr.Button("Actualizar", scale=0)
-    picks_df = gr.Dataframe(value=pd.DataFrame(), label="Picks", interactive=False)
-    parlay_df = gr.Dataframe(value=pd.DataFrame(), label="Parlay", interactive=False)
-    btn.click(refresh, inputs=[sport_dd], outputs=[picks_df, parlay_df])
-    sport_dd.change(refresh, inputs=[sport_dd], outputs=[picks_df, parlay_df])
+    try:
+        data = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
 
-if __name__ == "__main__":
-    demo.launch(server_name="0.0.0.0", server_port=7860)
+    try:
+        update = Update.model_validate(data)
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Update invalid: {e}")
+
+    # Entrega el update a Aiogram Dispatcher
+    await tg_dp.feed_webhook_update(tg_bot, update)
+    return PlainTextResponse("OK")
