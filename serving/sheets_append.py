@@ -1,62 +1,79 @@
-# .github/workflows/append-parlays.yml
-name: Append Parlays
+# serving/sheets_append.py
+# Anexa filas a Google Sheets usando tus secrets:
+# GSHEET_ID, GCP_SA_JSON, GSHEET_PICKS_TAB, GSHEET_PARLAY_TAB, GSHEET_GUARDADOS
 
-on:
-  workflow_dispatch:
+import os
+import csv
+import json
+from pathlib import Path
 
-jobs:
-  append-parlays:
-    runs-on: ubuntu-latest
+def _get_ws(spreadsheet_id: str, title: str):
+    import gspread
+    from google.oauth2.service_account import Credentials
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+    sa_json = os.getenv("GCP_SA_JSON")
+    if not sa_json:
+        raise RuntimeError("Falta GCP_SA_JSON en variables de entorno.")
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: "pip"
+    creds = Credentials.from_service_account_info(
+        json.loads(sa_json),
+        scopes=["https://www.googleapis.com/auth/spreadsheets"]
+    )
+    gc = gspread.authorize(creds)
+    sh = gc.open_by_key(spreadsheet_id)
+    try:
+        ws = sh.worksheet(title)
+    except Exception:
+        # crea si no existe
+        ws = sh.add_worksheet(title=title, rows=2000, cols=50)
+    return ws
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+def _append_csv(ws, csv_path: Path, has_header=True):
+    if not csv_path.exists():
+        print(f"[skip] no existe {csv_path}")
+        return 0
+    with csv_path.open(newline="", encoding="utf-8") as f:
+        reader = csv.reader(f)
+        rows = list(reader)
+        if has_header and rows:
+            rows = rows[1:]
+        if not rows:
+            print(f"[skip] {csv_path} vacío")
+            return 0
+        ws.append_rows(rows, value_input_option="USER_ENTERED")
+        print(f"[ok] {csv_path} -> {len(rows)} filas")
+        return len(rows)
 
-      # OPCIÓN A (recomendada): secret en BASE64
-      # Crea el secret: GOOGLE_SERVICE_ACCOUNT_JSON_B64 con el JSON en base64
-      - name: Write service_account.json from BASE64 secret
-        if: env.USE_B64 == '1'
-        env:
-          GOOGLE_SERVICE_ACCOUNT_JSON_B64: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON_B64 }}
-          USE_B64: 1
-        run: |
-          echo "$GOOGLE_SERVICE_ACCOUNT_JSON_B64" | base64 -d > service_account.json
-          python - << 'PY'
-import json,sys
-j=json.load(open("service_account.json"))
-assert "client_email" in j and "private_key" in j, "Credencial inválida"
-print("Credencial OK:", j["client_email"])
-PY
+def main():
+    spreadsheet_id = os.getenv("GSHEET_ID")
+    if not spreadsheet_id:
+        raise RuntimeError("Falta GSHEET_ID en variables de entorno.")
 
-      # OPCIÓN B: secret como JSON crudo (escapado). Crea GOOGLE_SERVICE_ACCOUNT_JSON
-      - name: Write service_account.json from raw JSON secret
-        if: env.USE_B64 != '1'
-        env:
-          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-        run: |
-          cat > service_account.json <<'JSON'
-${GOOGLE_SERVICE_ACCOUNT_JSON}
-JSON
-          python - << 'PY'
-import json,sys
-j=json.load(open("service_account.json"))
-assert "client_email" in j and "private_key" in j, "Credencial inválida"
-print("Credencial OK:", j["client_email"])
-PY
+    tab_picks = os.getenv("GSHEET_PICKS_TAB", "PICKS")
+    tab_parlay = os.getenv("GSHEET_PARLAY_TAB", "PARLAYS")
+    tab_guardados = os.getenv("GSHEET_GUARDADOS", "GUARDADOS")
 
-      - name: Run append script
-        env:
-          SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}   # <-- agrega este secret con el ID del Sheet
-        run: |
-          python serving/sheets_append.py
+    # rutas de ejemplo; ajusta si tus jobs generan otros paths
+    reports_dir = Path("reports")
+    picks_csv = reports_dir / "picks.csv"
+    parlays_csv = reports_dir / "parlay.csv"
+    guardados_csv = reports_dir / "guardados.csv"
+
+    total = 0
+
+    # Picks
+    ws_picks = _get_ws(spreadsheet_id, tab_picks)
+    total += _append_csv(ws_picks, picks_csv)
+
+    # Parlays
+    ws_parlay = _get_ws(spreadsheet_id, tab_parlay)
+    total += _append_csv(ws_parlay, parlays_csv)
+
+    # Guardados / favoritos (opcional)
+    ws_guard = _get_ws(spreadsheet_id, tab_guardados)
+    total += _append_csv(ws_guard, guardados_csv)
+
+    print(f"[done] total filas anexadas: {total}")
+
+if __name__ == "__main__":
+    main()
