@@ -1,163 +1,84 @@
-# serving/sheets_append.py
-import os
-import io
-import json
-import base64
-import hashlib
-from pathlib import Path
-from typing import List, Optional
-
-import pandas as pd
-import gspread
+from googleapiclient.discovery import build
 from google.oauth2.service_account import Credentials
-from gspread.exceptions import WorksheetNotFound, APIError
 
-# ---------- Config ----------
-GSHEET_ID = os.getenv("GSHEET_ID", "")
-TAB_PICKS = os.getenv("GSHEET_PICKS_TAB", "PICKS")
-TAB_PARLAYS = os.getenv("GSHEET_PARLAY_TAB", "PARLAYS")
+# ======================================================
+# CONFIGURACIÓN
+# ======================================================
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+SPREADSHEET_ID = "TU_SHEET_ID"  # <-- cambia esto por tu ID real
+RANGE_PARLAYS = "PARLAYS!A:H"   # ajusta si tienes más columnas
+SERVICE_FILE = "service_account.json"  # ruta a tu archivo de credenciales
 
-PICKS_CSV = Path("reports/picks.csv")
-PARLAY_CSV = Path("reports/parlay.csv")
+# ======================================================
+# FUNCIONES AUXILIARES
+# ======================================================
 
-# ---------- Auth ----------
-def _load_sa_credentials():
-    raw = os.getenv("GCP_SA_JSON", "")
-    if not raw:
-        raise RuntimeError("GCP_SA_JSON faltante (Service Account JSON)")
+def make_key(tipo, fecha, deporte, partido, mercado, pick):
+    """Crea una clave única combinando campos relevantes."""
+    parts = [str(x).strip().lower() for x in [tipo, fecha, deporte, partido, mercado, pick]]
+    return "|".join(parts)
 
-    txt = raw
-    if not raw.strip().startswith("{"):
-        try:
-            txt = base64.b64decode(raw).decode("utf-8")
-        except Exception:
-            txt = raw
+def get_existing_keys(service):
+    """Lee las claves existentes desde la hoja PARLAYS."""
+    result = service.spreadsheets().values().get(
+        spreadsheetId=SPREADSHEET_ID,
+        range=RANGE_PARLAYS
+    ).execute()
 
-    data = json.loads(txt)
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive",
+    rows = result.get("values", [])[1:]  # saltar encabezado
+    keys = set()
+
+    for r in rows:
+        if len(r) >= 7:
+            key = make_key(r[1], r[2], r[3], r[4], r[5], r[6])
+            keys.add(key)
+    return keys
+
+# ======================================================
+# FUNCIÓN PRINCIPAL PARA AGREGAR PARLAY
+# ======================================================
+
+def append_parlay(row):
+    """
+    row = [
+      ID, TIPO, FECHA, DEPORTE, PARTIDO, MERCADO, PICK, CUOTA (PROB %), STAKE
     ]
-    return Credentials.from_service_account_info(data, scopes=scopes)
+    """
+    creds = Credentials.from_service_account_file(SERVICE_FILE, scopes=SCOPES)
+    service = build("sheets", "v4", credentials=creds)
 
-def _open_sheet():
-    creds = _load_sa_credentials()
-    gc = gspread.authorize(creds)
-    return gc.open_by_key(GSHEET_ID)
+    new_key = make_key(row[1], row[2], row[3], row[4], row[5], row[6])
+    existing_keys = get_existing_keys(service)
 
-# ---------- Utilidades ----------
-def _uid_from_row(row: List[str]) -> str:
-    h = hashlib.sha1(("||".join([str(x) for x in row])).encode("utf-8")).hexdigest()
-    return h
-
-def _ensure_columns_order(df: pd.DataFrame, existing_header: Optional[List[str]]) -> pd.DataFrame:
-    if existing_header:
-        ordered = [c for c in existing_header if c in df.columns]
-        tail = [c for c in df.columns if c not in ordered]
-        df = df[ordered + tail]
-    return df
-
-def _sheet_to_df(ws) -> pd.DataFrame:
-    try:
-        values = ws.get_all_values()
-    except gspread.exceptions.APIError:
-        return pd.DataFrame()
-    if not values:
-        return pd.DataFrame()
-    header = values[0]
-    rows = values[1:]
-    if not rows:
-        return pd.DataFrame(columns=header)
-    return pd.DataFrame(rows, columns=header)
-
-def _df_to_sheet(ws, df: pd.DataFrame):
-    ws.clear()
-    if df.empty:
-        ws.update([[]])
-        return
-    df_str = df.fillna("").astype(str)
-    data = [list(df_str.columns)] + df_str.values.tolist()
-    ws.update(data, value_input_option="RAW")
-
-def _dedup_df(df_existing: pd.DataFrame, df_new: pd.DataFrame) -> pd.DataFrame:
-    base = pd.concat([df_existing, df_new], ignore_index=True) if not df_existing.empty else df_new.copy()
-    cols = [c.lower() for c in base.columns]
-    if "id" in cols:
-        idcol = base.columns[cols.index("id")]
-        base = base.drop_duplicates(subset=[idcol], keep="first")
-    else:
-        uid = base.apply(lambda r: _uid_from_row([str(x) for x in r.values]), axis=1)
-        base = base.assign(__uid=uid).drop_duplicates(subset=["__uid"], keep="first").drop(columns="__uid")
-    return base.reset_index(drop=True)
-
-def _add_id_if_missing(df: pd.DataFrame, key_cols: Optional[List[str]] = None) -> pd.DataFrame:
-    if df.empty:
-        return df
-    cols = [c.lower() for c in df.columns]
-    if "id" in cols:
-        return df
-    if key_cols and all(k in df.columns for k in key_cols):
-        base = df[key_cols].astype(str).agg("||".join, axis=1)
-    else:
-        base = df.astype(str).agg("||".join, axis=1)
-    df = df.copy()
-    df.insert(0, "ID", base.apply(lambda s: hashlib.sha1(s.encode("utf-8")).hexdigest()))
-    return df
-
-# ---------- Obtener/crear worksheet de forma robusta ----------
-def _get_or_create_ws(sh, tab_name: str):
-    target = tab_name.strip()
-    # 1) Busca case-insensitive entre todas las hojas
-    for ws in sh.worksheets():
-        if ws.title.strip().lower() == target.lower():
-            return ws
-    # 2) Intenta crear; si API dice 'already exists', vuelve a buscar por nombre exacto
-    try:
-        return sh.add_worksheet(title=target, rows=1000, cols=30)
-    except APIError as e:
-        msg = str(e).lower()
-        if "already exists" in msg or "already exists" in getattr(e, "response", {}).get("message", "").lower():
-            try:
-                return sh.worksheet(target)
-            except WorksheetNotFound:
-                # Último recurso: buscar por coincidencia parcial
-                for ws in sh.worksheets():
-                    if ws.title.strip().lower() == target.lower():
-                        return ws
-        raise
-
-# ---------- Flujo por pestaña ----------
-def _process_tab(sh, tab_name: str, csv_path: Path):
-    if not csv_path.exists():
-        print(f"{tab_name}: archivo no encontrado -> {csv_path}")
+    if new_key in existing_keys:
+        print(f"[SKIP] Duplicado detectado: {new_key}")
         return
 
-    df_new = pd.read_csv(csv_path)
-    if df_new.empty:
-        print(f"{tab_name}: CSV vacío; nada que enviar")
-        return
+    body = {"values": [row]}
+    service.spreadsheets().values().append(
+        spreadsheetId=SPREADSHEET_ID,
+        range="PARLAYS!A1",
+        valueInputOption="USER_ENTERED",
+        insertDataOption="INSERT_ROWS",
+        body=body
+    ).execute()
 
-    df_new = _add_id_if_missing(df_new)
+    print(f"[OK] Parlay agregado correctamente: {row[0]}")
 
-    ws = _get_or_create_ws(sh, tab_name)
-    df_existing = _sheet_to_df(ws)
-    header_existing = list(df_existing.columns) if not df_existing.empty else list(df_new.columns)
-
-    df_new = _ensure_columns_order(df_new, header_existing)
-    df_final = _dedup_df(df_existing, df_new)
-    df_final = _ensure_columns_order(df_final, header_existing)
-
-    _df_to_sheet(ws, df_final)
-    print(f"{tab_name}: subidos {len(df_new)} nuevos, total {len(df_final)} (sin duplicados)")
-
-def main():
-    if not GSHEET_ID:
-        print("GSHEET_ID faltante; omitiendo envío a Google Sheets.")
-        return
-    sh = _open_sheet()
-
-    _process_tab(sh, TAB_PICKS, PICKS_CSV)
-    _process_tab(sh, TAB_PARLAYS, PARLAY_CSV)
-
+# ======================================================
+# EJEMPLO DE USO
+# ======================================================
 if __name__ == "__main__":
-    main()
+    ejemplo_row = [
+        "PR20251019-TEST01",   # ID
+        "🔒 Segurito",          # TIPO
+        "19/10/2025",          # FECHA
+        "american",            # DEP
+        "Tennessee Titans vs New England Patriots",  # PARTIDO
+        "ML",                  # MERCADO
+        "Tennessee Titans ML", # PICK
+        "1.85 (54%)",          # CUOTA (PROB %)
+        "5%"                   # STAKE
+    ]
+
+    append_parlay(ejemplo_row)
