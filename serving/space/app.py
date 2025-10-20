@@ -1,80 +1,54 @@
-"""
-App de despliegue gratuito en Hugging Face Spaces (SDK: Gradio)
-- Expone un endpoint de webhook para Telegram usando FastAPI
-- Monta una UI mínima de estado con Gradio en /
-- Respeta los nombres de variables en "claves" y crea alias para el bot existente
+# app.py — Webhook FastAPI + Gradio (Hugging Face Space con SDK Gradio)
+# - Registra el webhook de Telegram al arrancar
+# - Monta una UI mínima en "/" para ver estado
+# - Respeta tus claves: TELEGRAM_BOT_TOKEN, HF_SPACE, GSHEET_ID, GCP_SA_JSON
+#   (y crea alias hacia GOOGLE_* si tu bot.py los usa internamente)
 
-Requisitos del Space (Settings → Variables and secrets):
-  TELEGRAM_BOT_TOKEN        (obligatorio)
-  HF_SPACE                  (https://<org>-<space>.hf.space)
-  # opcional: definir WEBHOOK_SECRET_PATH (si no, se deriva del token)
-
-  # Google Sheets (opcionales)
-  GSHEET_ID
-  GCP_SA_JSON               # o GOOGLE_APPLICATION_CREDENTIALS
-
-Nota: No es necesario modificar tu bot.py. Este app.py exporta alias de env
-para que bot.py siga funcionando sin cambios.
-"""
 from __future__ import annotations
 import os
 import logging
-import json
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import PlainTextResponse
 import gradio as gr
 
-# =============================
-#  Aliases de variables (ajuste a "claves")
-# =============================
-# Hacemos alias antes de importar bot.py
+# ---- Aliases de variables (claves -> GOOGLE_*) antes de importar bot.py ----
 if os.getenv("GSHEET_ID") and not os.getenv("GOOGLE_SHEETS_ID"):
-    os.environ["GOOGLE_SHEETS_ID"] = os.getenv("GSHEET_ID")  # alias
+    os.environ["GOOGLE_SHEETS_ID"] = os.getenv("GSHEET_ID")
 if os.getenv("GCP_SA_JSON") and not os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON"):
-    os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"] = os.getenv("GCP_SA_JSON")  # alias
+    os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"] = os.getenv("GCP_SA_JSON")
 
-# (otros alias posibles en el futuro)
-
-# =============================
-#  Importar el bot existente (del canvas)
-# =============================
+# ---- Importa tu bot (handlers, dispatcher y bot) ----
 from bot import dp as tg_dp, bot as tg_bot, BOT_COMMANDS  # type: ignore
 from aiogram.types import Update
 
-# =============================
-#  Lectura de secrets
-# =============================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-HF_SPACE = os.getenv("HF_SPACE")  # ej. https://org-space.hf.space
-WEBHOOK_SECRET_PATH = os.getenv("WEBHOOK_SECRET_PATH")
+HF_SPACE = os.getenv("HF_SPACE")  # p.ej. https://org-mi-bot.hf.space
+WEBHOOK_SECRET_PATH = os.getenv("WEBHOOK_SECRET_PATH")  # opcional
 
 if not TELEGRAM_BOT_TOKEN:
-    raise RuntimeError("Falta TELEGRAM_BOT_TOKEN en secrets del Space.")
+    raise RuntimeError("Falta TELEGRAM_BOT_TOKEN en 'claves' del Space.")
 if not HF_SPACE:
-    raise RuntimeError("Falta HF_SPACE (URL público del Space) en secrets.")
+    raise RuntimeError("Falta HF_SPACE (URL público del Space).")
 
-# Derivar secret si no está seteado
+# Secret derivado si no está definido
 if not WEBHOOK_SECRET_PATH:
-    # usa los últimos 32 chars del token para formar un secret reproducible
     WEBHOOK_SECRET_PATH = (TELEGRAM_BOT_TOKEN[-32:]).replace(":", "_")
 
 HF_SPACE = HF_SPACE.rstrip("/")
 WEBHOOK_URL = f"{HF_SPACE}/webhook/{WEBHOOK_SECRET_PATH}"
 
-# =============================
-#  FastAPI app + Gradio UI
-# =============================
+# --------- FastAPI + Gradio UI ----------
 app = FastAPI()
 
-# UI mínima en Gradio para ver estado
 with gr.Blocks(title="Bot Americano — Status") as demo:
-    gr.Markdown("""
-    # 🤖 Bot Americano — Webhook activo
-    - **Webhook URL:** `{WEBHOOK_URL}`
-    - **Space:** `{HF_SPACE}`
-    - **Vars Sheets:** `GSHEET_ID` → `{gs}` / `GCP_SA_JSON` → `{sa}`
-    """.format(WEBHOOK_URL=WEBHOOK_URL, HF_SPACE=HF_SPACE,
-                gs=bool(os.getenv("GSHEET_ID")), sa=bool(os.getenv("GCP_SA_JSON"))))
+    gr.Markdown(
+        f"""
+# 🤖 Bot Americano — Webhook activo
+- **Webhook URL:** `{WEBHOOK_URL}`
+- **Space:** `{HF_SPACE}`
+- **Sheets activos:** GSHEET_ID={'✅' if os.getenv('GSHEET_ID') else '❌'} · GCP_SA_JSON={'✅' if os.getenv('GCP_SA_JSON') else '❌'}
+        """
+    )
 
 app = gr.mount_gradio_app(app, demo, path="/")
 
@@ -84,14 +58,16 @@ async def health():
 
 @app.on_event("startup")
 async def on_startup():
-    # fija /help, /menu, etc.
     try:
         await tg_bot.set_my_commands(BOT_COMMANDS)
     except Exception as e:
         logging.warning("No se pudieron fijar comandos: %s", e)
-    # registra webhook
     try:
-        await tg_bot.set_webhook(WEBHOOK_URL, drop_pending_updates=True, allowed_updates=["message","callback_query"])
+        await tg_bot.set_webhook(
+            WEBHOOK_URL,
+            drop_pending_updates=True,
+            allowed_updates=["message","callback_query"]
+        )
         logging.info("Webhook fijado: %s", WEBHOOK_URL)
     except Exception as e:
         logging.error("set_webhook falló: %s", e)
